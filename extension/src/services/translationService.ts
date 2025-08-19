@@ -99,7 +99,14 @@ export class TranslationService {
         try {
             this.outputChannel.appendLine(`Translating goal: ${goalText.substring(0, 100)}...`);
             
-            const prompt = `将以下Lean 4数学目标翻译成中文，保持数学符号不变：
+            const prompt = `我给你一些Lean 4的状态，你能不能帮我把它们翻译成数学家能看懂的中文版本？然后用markdown写出来。对于每一道题，输出的每个语言的markdown文件包括两部分：已知（Assumptions）和目标（Goal）。要求：
+- 数学家都看不懂Lean代码的，所以不要把任何Lean内置有特殊含义的写法或者代码放进输出当中，尽量使用其对应的数学含义
+- 不要擅自省略任何条件，原版有什么条件，就原原本本包含进来
+- 如果一个条件重复了很多次，那就只保留一次就行，并且你不需要注明它重复之类的
+- 数学公式使用$和$$进行转义
+- 如果数学中有约定俗成的标记，比如\mathbb{N}表示自然数集，可以说明然后使用
+- 表达尽量简洁
+- 直接输出markdown代码给我，不要用代码框包住
 
 ${goalText}`;
 

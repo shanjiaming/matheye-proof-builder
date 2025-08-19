@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as https from 'https';
 import { LeanClientService } from './services/leanClient';
 import { CodeModifierService } from './services/codeModifier';
 import { TranslationService } from './services/translationService';
@@ -21,6 +22,50 @@ export function activate(context: vscode.ExtensionContext) {
     const logDebug = (msg: string) => { if (logLevel() === 'debug') outputChannel.appendLine(msg); };
     const logInfo = (msg: string) => { if (logLevel() !== 'off' && logLevel() !== 'error') outputChannel.appendLine(msg); };
     const logError = (msg: string) => { if (logLevel() !== 'off') outputChannel.appendLine(msg); };
+
+    // Assets for Markdown + KaTeX rendering (inlined to avoid remote CSP issues)
+    type WebAssets = { markedJs: string; domPurifyJs: string; katexJs: string; autoRenderJs: string; katexCss: string };
+    let assetsCache: WebAssets | null = null;
+    let assetsLoading: Promise<WebAssets> | null = null;
+
+    const fetchText = (url: string): Promise<string> => new Promise((resolve, reject) => {
+        https.get(url, (res) => {
+            if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                fetchText(res.headers.location).then(resolve, reject);
+                return;
+            }
+            if (res.statusCode !== 200) { reject(new Error(`HTTP ${res.statusCode} for ${url}`)); return; }
+            let data = '';
+            res.setEncoding('utf8');
+            res.on('data', (chunk) => data += chunk);
+            res.on('end', () => resolve(data));
+        }).on('error', reject);
+    });
+
+    async function ensureAssets(): Promise<WebAssets> {
+        if (assetsCache) return assetsCache;
+        if (assetsLoading) return assetsLoading;
+        const MARKED = 'https://cdn.jsdelivr.net/npm/marked@12.0.1/marked.min.js';
+        const PURIFY = 'https://cdn.jsdelivr.net/npm/dompurify@3.0.2/dist/purify.min.js';
+        const KATEX_JS = 'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js';
+        const AUTO_JS = 'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js';
+        const KATEX_CSS = 'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css';
+        assetsLoading = Promise.all([
+            fetchText(MARKED),
+            fetchText(PURIFY),
+            fetchText(KATEX_JS),
+            fetchText(AUTO_JS),
+            fetchText(KATEX_CSS),
+        ]).then(([markedJs, domPurifyJs, katexJs, autoRenderJs, katexCss]) => {
+            assetsCache = { markedJs, domPurifyJs, katexJs, autoRenderJs, katexCss };
+            assetsLoading = null;
+            return assetsCache;
+        }).catch((e) => {
+            assetsLoading = null;
+            throw e;
+        });
+        return assetsLoading;
+    }
     
     // Global state for webview panel
     let currentPanel: vscode.WebviewPanel | undefined = undefined;
@@ -253,7 +298,13 @@ export function activate(context: vscode.ExtensionContext) {
             try {
                 // Only update the HTML when the goal count or lock state changes to prevent flicker
                 try { currentPanel.webview.postMessage({ type: 'goals', count: currentGoals.length }); } catch {}
-                currentPanel.webview.html = getWebviewContent(currentGoals, positionLocked, currentPosition, translationService.isTranslationEnabled());
+                try {
+                    const assets = await ensureAssets();
+                    currentPanel.webview.html = getWebviewContent(currentGoals, positionLocked, currentPosition, translationService.isTranslationEnabled(), assets);
+                } catch (e) {
+                    logError(`Asset load failed, falling back to plain text: ${e}`);
+                    currentPanel.webview.html = getWebviewContent(currentGoals, positionLocked, currentPosition, translationService.isTranslationEnabled(), null);
+                }
             } catch (e) {
                 logDebug(`Webview update failed (maybe disposed): ${e}`);
                 currentPanel = undefined;
@@ -345,7 +396,13 @@ function createProofGoalsPanel(
 /**
  * Generate HTML content for webview
  */
-function getWebviewContent(goals: ProofGoal[], positionLocked: boolean, lockedPos?: vscode.Position, translationEnabled?: boolean): string {
+function getWebviewContent(
+    goals: ProofGoal[],
+    positionLocked: boolean,
+    lockedPos?: vscode.Position,
+    translationEnabled?: boolean,
+    assets?: { markedJs: string; domPurifyJs: string; katexJs: string; autoRenderJs: string; katexCss: string } | null
+): string {
     const lockLabel = positionLocked ? '▶ 解除固定' : '⏸ 固定光标';
     const translationLabel = translationEnabled ? '🌐 关闭翻译' : '🌐 开启翻译';
     const lockInfo = positionLocked && lockedPos ? `<span class="lock-info">已固定于第 ${lockedPos.line + 1} 行</span>` : '';
@@ -364,8 +421,8 @@ function getWebviewContent(goals: ProofGoal[], positionLocked: boolean, lockedPo
                     ${hasTranslation ? `
                         <div class="goal-section">
                             <div class="goal-section-title">自然语言：</div>
-                            <div class="goal-translation ${goal.translationError ? 'error' : ''}">
-                                ${goal.translationError || goal.translation || '翻译中...'}
+                            <div class="goal-translation ${goal.translationError ? 'error' : ''}" ${goal.translationError ? '' : `data-raw="${encodeURIComponent(goal.translation || '翻译中...')}"`}>
+                                ${goal.translationError || ''}
                             </div>
                         </div>
                     ` : ''}
@@ -384,7 +441,7 @@ function getWebviewContent(goals: ProofGoal[], positionLocked: boolean, lockedPo
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline';">
+            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline' https://cdn.jsdelivr.net; script-src 'unsafe-inline'; font-src https://cdn.jsdelivr.net data:;">
             <title>MathEye Proof Builder</title>
             <style>
                 body {
@@ -466,6 +523,7 @@ function getWebviewContent(goals: ProofGoal[], positionLocked: boolean, lockedPo
                     padding-bottom: 10px;
                 }
             </style>
+            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
         </head>
         <body>
             <div class="toolbar">
@@ -480,6 +538,10 @@ function getWebviewContent(goals: ProofGoal[], positionLocked: boolean, lockedPo
             ${goals.length === 0 ? `<p>当前光标位置没有待证目标。移动光标或编辑代码后将自动刷新。</p>` : `<p>请对每个目标给出反馈：</p>`}
             ${goalsHtml}
             
+            ${assets ? `<script>${assets.markedJs}</script>` : ''}
+            ${assets ? `<script>${assets.domPurifyJs}</script>` : ''}
+            ${assets ? `<script>${assets.katexJs}</script>` : ''}
+            ${assets ? `<script>${assets.autoRenderJs}</script>` : ''}
             <script>
                 console.log('Webview script loading...');
                 const vscode = acquireVsCodeApi();
@@ -523,6 +585,39 @@ function getWebviewContent(goals: ProofGoal[], positionLocked: boolean, lockedPo
                     if (btn) btn.textContent = msg.enabled ? '🌐 关闭翻译' : '🌐 开启翻译';
                   }
                 });
+
+                function renderTranslations() {
+                  const blocks = document.querySelectorAll('.goal-translation');
+                  blocks.forEach((el) => {
+                    if (el.classList.contains('error')) return;
+                    const rawEnc = el.getAttribute('data-raw') || '';
+                    if (!rawEnc) return;
+                    let raw = '';
+                    try { raw = decodeURIComponent(rawEnc); } catch { raw = ''; }
+                    if (!raw) return;
+                    try {
+                      const html = (window.marked && window.marked.parse) ? window.marked.parse(raw) : raw;
+                      const safeHtml = (window.DOMPurify && window.DOMPurify.sanitize) ? window.DOMPurify.sanitize(html) : html;
+                      el.innerHTML = safeHtml;
+                      if (window.renderMathInElement) {
+                        window.renderMathInElement(el, {
+                          delimiters: [
+                            { left: '$$', right: '$$', display: true },
+                            { left: '$', right: '$', display: false },
+                            { left: '\\(', right: '\\)', display: false },
+                            { left: '\\[', right: '\\]', display: true }
+                          ],
+                          throwOnError: false
+                        });
+                      }
+                    } catch (e) {
+                      console.warn('Render translation failed', e);
+                    }
+                  });
+                }
+
+                document.addEventListener('DOMContentLoaded', renderTranslations);
+                setTimeout(renderTranslations, 200);
             </script>
         </body>
         </html>
