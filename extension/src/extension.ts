@@ -227,30 +227,30 @@ export function activate(context: vscode.ExtensionContext) {
             // Update cached state and webview content
             currentEditor = textEditor;
             
-            // Translate goals if translation is enabled
+            // Show goals immediately; kick off translations asynchronously so UI is never blocked
+            currentGoals = response.goals.map(g => ({ ...g }));
             if (translationService.isTranslationEnabled()) {
-                logDebug('Translation enabled, translating goals...');
-                const translatedGoals = await Promise.all(
-                    response.goals.map(async (goal) => {
-                        try {
-                            const result = await translationService.translateGoal(goal.type);
-                            return {
-                                ...goal,
-                                translation: result.translated,
-                                translationError: result.error
-                            };
-                        } catch (error) {
-                            logError(`Translation failed for goal: ${error}`);
-                            return {
-                                ...goal,
-                                translationError: `Translation failed: ${error}`
-                            };
-                        }
-                    })
-                );
-                currentGoals = translatedGoals;
-            } else {
-                currentGoals = response.goals;
+                logDebug('Translation enabled, start async translations...');
+                const versionAtStart = Date.now();
+                const goalsSnapshot = currentGoals.map(g => g.type);
+                Promise.all(goalsSnapshot.map(async (goalText, idx) => {
+                    try {
+                        const result = await translationService.translateGoal(goalText);
+                        // Only apply if panel still exists and goal matches snapshot at same index
+                        const editorNow = vscode.window.activeTextEditor;
+                        if (!currentPanel || !editorNow) return;
+                        if (!currentGoals[idx] || currentGoals[idx].type !== goalText) return;
+                        currentGoals[idx] = {
+                            ...currentGoals[idx],
+                            translation: result.translated,
+                            translationError: result.error
+                        };
+                        try { currentPanel.webview.postMessage({ type: 'goals', count: currentGoals.length }); } catch {}
+                        currentPanel.webview.html = getWebviewContent(currentGoals, positionLocked, currentPosition, translationService.isTranslationEnabled(), getLocalAssets(), currentPanel.webview.cspSource);
+                    } catch (error) {
+                        logError(`Translation failed for goal: ${error}`);
+                    }
+                })).catch(() => {});
             }
             
             currentPosition = position;
@@ -368,7 +368,7 @@ function getWebviewContent(
     const translationLabel = translationEnabled ? '🌐 关闭翻译' : '🌐 开启翻译';
     const lockInfo = positionLocked && lockedPos ? `<span class="lock-info">已固定于第 ${lockedPos.line + 1} 行</span>` : '';
     const goalsHtml = goals.map((goal, index) => {
-        const hasTranslation = translationEnabled && (goal.translation || goal.translationError);
+        const hasTranslation = !!translationEnabled;
         return `
             <div class="goal">
                 <div class="goal-header">
@@ -382,8 +382,8 @@ function getWebviewContent(
                     ${hasTranslation ? `
                         <div class="goal-section">
                             <div class="goal-section-title">自然语言：</div>
-                            <div class="goal-translation ${goal.translationError ? 'error' : ''}" ${goal.translationError ? '' : `data-raw="${encodeURIComponent(goal.translation || '翻译中...')}"`}>
-                                ${goal.translationError || ''}
+                            <div class="goal-translation ${goal.translationError ? 'error' : ''}" ${goal.translationError ? '' : `data-raw="${encodeURIComponent(goal.translation ?? (goal.translationError ? '' : '翻译中...'))}"`}>
+                                ${goal.translationError || (goal.translation ? '' : '翻译中...')}
                             </div>
                         </div>
                     ` : ''}
