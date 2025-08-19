@@ -1,0 +1,141 @@
+{
+  "name": "matheye-proof-builder",
+  "displayName": "MathEye Proof Builder",
+  "description": "Low-code interactive proof construction interface for Lean 4",
+  "version": "1.0.0",
+  "publisher": "matheye",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Visualization"
+  ],
+  "keywords": [
+    "lean4",
+    "mathematics",
+    "proof",
+    "interactive",
+    "low-code"
+  ],
+  "activationEvents": [
+    "onLanguage:lean4",
+    "onCommand:matheye.startProofBuilder",
+    "onCommand:matheye.analyzeProofGoals"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "MathEye Proof Builder",
+      "properties": {
+        "matheye.logLevel": {
+          "type": "string",
+          "enum": [
+            "off",
+            "error",
+            "info",
+            "debug"
+          ],
+          "default": "error",
+          "description": "Logging verbosity for MathEye output channel."
+        },
+        "matheye.updateDebounceMs": {
+          "type": "number",
+          "default": 250,
+          "minimum": 0,
+          "maximum": 2000,
+          "description": "Debounce time in milliseconds for goal updates when moving the cursor or editing."
+        },
+        "matheye.translation.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable automatic translation of Lean goals to natural language."
+        },
+        "matheye.openai.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI API key for goal translation. If empty, will use OPENAI_API_KEY environment variable."
+        },
+        "matheye.openai.model": {
+          "type": "string",
+          "default": "gpt-5-nano",
+          "enum": [
+            "gpt-5-nano",
+            "gpt-5-mini",
+            "gpt-5",
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-3.5-turbo"
+          ],
+          "description": "OpenAI model to use for translation. GPT-5 models offer better performance and reduced hallucination."
+        },
+        "matheye.openai.baseUrl": {
+          "type": "string",
+          "default": "https://api.openai.com",
+          "description": "OpenAI API base URL (for custom endpoints)."
+        },
+        "matheye.openai.timeout": {
+          "type": "number",
+          "default": 60000,
+          "minimum": 1000,
+          "maximum": 120000,
+          "description": "Timeout for OpenAI API requests in milliseconds."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "matheye.startProofBuilder",
+        "title": "Start Proof Builder",
+        "category": "MathEye"
+      },
+      {
+        "command": "matheye.analyzeProofGoals",
+        "title": "Analyze Proof Goals",
+        "category": "MathEye"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "matheye.startProofBuilder",
+          "when": "editorLangId == lean4"
+        },
+        {
+          "command": "matheye.analyzeProofGoals",
+          "when": "editorLangId == lean4"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "matheye.startProofBuilder",
+          "when": "editorLangId == lean4",
+          "group": "navigation@1"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && mocha --recursive ./out/test/**/*.js"
+  },
+  "dependencies": {
+    "@types/node": "^18.x"
+  },
+  "devDependencies": {
+    "@types/chai": "^5.2.2",
+    "@types/mocha": "^10.0.10",
+    "@types/mock-require": "^3.0.0",
+    "@types/vscode": "^1.80.0",
+    "chai": "^5.3.1",
+    "mocha": "^11.7.1",
+    "mock-require": "^3.0.3",
+    "typescript": "^5.0.0"
+  },
+  "extensionDependencies": [
+    "leanprover.lean4"
+  ],
+  "license": "MIT"
+}

@@ -1,0 +1,30 @@
+{
+    "lean4.projectRoot": ".",
+    "lean4.toolchainPath": "",
+    "lean4.serverArgs": ["--server"],
+    "lean4.serverEnv": {
+        "LEAN_PATH": ""
+    },
+    "lean4.infoViewAutoOpen": true,
+    "lean4.infoViewAutoOpenShowGoal": true,
+    "files.associations": {
+        "*.lean": "lean4"
+    },
+  "[lean4]": {
+    "editor.insertSpaces": true,
+    "editor.tabSize": 2,
+    "editor.detectIndentation": false,
+    "editor.autoIndent": "none",
+    "editor.formatOnType": false,
+    "editor.formatOnPaste": false
+  },
+    "files.exclude": {
+        "**/.git": true,
+        "**/.svn": true,
+        "**/.hg": true,
+        "**/.DS_Store": true,
+        "**/Thumbs.db": true,
+        ".yoyo": true
+    },
+    "editor.tabSize": 2
+}

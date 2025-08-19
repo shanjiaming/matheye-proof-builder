@@ -1,0 +1,31 @@
+{
+    "folders": [
+        {
+            "path": "."
+        }
+    ],
+    "settings": {
+        "lean4.toolchainPath": "",
+        "lean4.serverArgs": [],
+        "lean4.serverEnv": {
+            "LEAN_PATH": ""
+    },
+    "files.associations": {
+      "*.lean": "lean4"
+    },
+    "[lean4]": {
+      "editor.insertSpaces": true,
+      "editor.tabSize": 2,
+      "editor.detectIndentation": false,
+      "editor.autoIndent": "none",
+      "editor.formatOnType": false,
+      "editor.formatOnPaste": false
+    }
+    },
+    "extensions": {
+        "recommendations": [
+            "leanprover.lean4",
+            "ms-vscode.vscode-json"
+        ]
+    }
+}
