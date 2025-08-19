@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
-import * as https from 'https';
+import * as path from 'path';
+import * as fs from 'fs';
 import { LeanClientService } from './services/leanClient';
 import { CodeModifierService } from './services/codeModifier';
 import { TranslationService } from './services/translationService';
@@ -23,49 +24,7 @@ export function activate(context: vscode.ExtensionContext) {
     const logInfo = (msg: string) => { if (logLevel() !== 'off' && logLevel() !== 'error') outputChannel.appendLine(msg); };
     const logError = (msg: string) => { if (logLevel() !== 'off') outputChannel.appendLine(msg); };
 
-    // Assets for Markdown + KaTeX rendering (inlined to avoid remote CSP issues)
-    type WebAssets = { markedJs: string; domPurifyJs: string; katexJs: string; autoRenderJs: string; katexCss: string };
-    let assetsCache: WebAssets | null = null;
-    let assetsLoading: Promise<WebAssets> | null = null;
-
-    const fetchText = (url: string): Promise<string> => new Promise((resolve, reject) => {
-        https.get(url, (res) => {
-            if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                fetchText(res.headers.location).then(resolve, reject);
-                return;
-            }
-            if (res.statusCode !== 200) { reject(new Error(`HTTP ${res.statusCode} for ${url}`)); return; }
-            let data = '';
-            res.setEncoding('utf8');
-            res.on('data', (chunk) => data += chunk);
-            res.on('end', () => resolve(data));
-        }).on('error', reject);
-    });
-
-    async function ensureAssets(): Promise<WebAssets> {
-        if (assetsCache) return assetsCache;
-        if (assetsLoading) return assetsLoading;
-        const MARKED = 'https://cdn.jsdelivr.net/npm/marked@12.0.1/marked.min.js';
-        const PURIFY = 'https://cdn.jsdelivr.net/npm/dompurify@3.0.2/dist/purify.min.js';
-        const KATEX_JS = 'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js';
-        const AUTO_JS = 'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js';
-        const KATEX_CSS = 'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css';
-        assetsLoading = Promise.all([
-            fetchText(MARKED),
-            fetchText(PURIFY),
-            fetchText(KATEX_JS),
-            fetchText(AUTO_JS),
-            fetchText(KATEX_CSS),
-        ]).then(([markedJs, domPurifyJs, katexJs, autoRenderJs, katexCss]) => {
-            assetsCache = { markedJs, domPurifyJs, katexJs, autoRenderJs, katexCss };
-            assetsLoading = null;
-            return assetsCache;
-        }).catch((e) => {
-            assetsLoading = null;
-            throw e;
-        });
-        return assetsLoading;
-    }
+    // (moved to module scope below)
     
     // Global state for webview panel
     let currentPanel: vscode.WebviewPanel | undefined = undefined;
@@ -298,13 +257,14 @@ export function activate(context: vscode.ExtensionContext) {
             try {
                 // Only update the HTML when the goal count or lock state changes to prevent flicker
                 try { currentPanel.webview.postMessage({ type: 'goals', count: currentGoals.length }); } catch {}
-                try {
-                    const assets = await ensureAssets();
-                    currentPanel.webview.html = getWebviewContent(currentGoals, positionLocked, currentPosition, translationService.isTranslationEnabled(), assets);
-                } catch (e) {
-                    logError(`Asset load failed, falling back to plain text: ${e}`);
-                    currentPanel.webview.html = getWebviewContent(currentGoals, positionLocked, currentPosition, translationService.isTranslationEnabled(), null);
-                }
+                currentPanel.webview.html = getWebviewContent(
+                    currentGoals,
+                    positionLocked,
+                    currentPosition,
+                    translationService.isTranslationEnabled(),
+                    getLocalAssets(),
+                    currentPanel.webview.cspSource
+                );
             } catch (e) {
                 logDebug(`Webview update failed (maybe disposed): ${e}`);
                 currentPanel = undefined;
@@ -370,7 +330,7 @@ function createProofGoalsPanel(
 
     // Set webview content
     const s0 = getState();
-    panel.webview.html = getWebviewContent(s0.goals, s0.positionLocked, s0.lockedPosition, translationService?.isTranslationEnabled());
+    panel.webview.html = getWebviewContent(s0.goals, s0.positionLocked, s0.lockedPosition, translationService?.isTranslationEnabled(), getLocalAssets(), panel.webview.cspSource);
 
     // Handle messages from webview
     panel.webview.onDidReceiveMessage((message) => {
@@ -382,7 +342,7 @@ function createProofGoalsPanel(
     panel.onDidChangeViewState(() => {
         // Trigger a refresh using latest known state
         const s = getState();
-        panel.webview.html = getWebviewContent(s.goals, s.positionLocked, s.lockedPosition, translationService?.isTranslationEnabled());
+        panel.webview.html = getWebviewContent(s.goals, s.positionLocked, s.lockedPosition, translationService?.isTranslationEnabled(), getLocalAssets(), panel.webview.cspSource);
     }, null, context.subscriptions);
 
     // Handle panel disposal
@@ -401,7 +361,8 @@ function getWebviewContent(
     positionLocked: boolean,
     lockedPos?: vscode.Position,
     translationEnabled?: boolean,
-    assets?: { markedJs: string; domPurifyJs: string; katexJs: string; autoRenderJs: string; katexCss: string } | null
+    assets?: { katexCssHref: string; markedJsHref: string; domPurifyJsHref: string; katexJsHref: string; autoRenderJsHref: string },
+    cspSource?: string
 ): string {
     const lockLabel = positionLocked ? '▶ 解除固定' : '⏸ 固定光标';
     const translationLabel = translationEnabled ? '🌐 关闭翻译' : '🌐 开启翻译';
@@ -441,7 +402,7 @@ function getWebviewContent(
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline' https://cdn.jsdelivr.net; script-src 'unsafe-inline'; font-src https://cdn.jsdelivr.net data:;">
+            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource ?? 'data:'} data:; style-src 'unsafe-inline' ${cspSource ?? ''}; script-src 'unsafe-inline' ${cspSource ?? ''}; font-src ${cspSource ?? ''} data:;">
             <title>MathEye Proof Builder</title>
             <style>
                 body {
@@ -523,7 +484,7 @@ function getWebviewContent(
                     padding-bottom: 10px;
                 }
             </style>
-            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+            ${assets ? `<style>${assets.katexCssHref}</style>` : ''}
         </head>
         <body>
             <div class="toolbar">
@@ -538,10 +499,10 @@ function getWebviewContent(
             ${goals.length === 0 ? `<p>当前光标位置没有待证目标。移动光标或编辑代码后将自动刷新。</p>` : `<p>请对每个目标给出反馈：</p>`}
             ${goalsHtml}
             
-            ${assets ? `<script>${assets.markedJs}</script>` : ''}
-            ${assets ? `<script>${assets.domPurifyJs}</script>` : ''}
-            ${assets ? `<script>${assets.katexJs}</script>` : ''}
-            ${assets ? `<script>${assets.autoRenderJs}</script>` : ''}
+            ${assets ? `<script>${assets.markedJsHref}</script>` : ''}
+            ${assets ? `<script>${assets.domPurifyJsHref}</script>` : ''}
+            ${assets ? `<script>${assets.katexJsHref}</script>` : ''}
+            ${assets ? `<script>${assets.autoRenderJsHref}</script>` : ''}
             <script>
                 console.log('Webview script loading...');
                 const vscode = acquireVsCodeApi();
@@ -626,4 +587,40 @@ function getWebviewContent(
 
 export function deactivate() {
     console.log('MathEye Proof Builder deactivated');
+}
+
+// Build local URIs for KaTeX fonts/CSS and local scripts to avoid CDN
+function getLocalAssets(): {
+    katexCssHref: string; markedJsHref: string; domPurifyJsHref: string; katexJsHref: string; autoRenderJsHref: string
+} {
+    // __dirname points to extension/out at runtime; go up to extension/
+    const base = path.join(__dirname, '..');
+    const nodeRoot = path.join(base, 'node_modules');
+    const read = (p: string) => fs.readFileSync(p, 'utf8');
+    const fontsDir = path.join(nodeRoot, 'katex', 'dist', 'fonts');
+    let css = read(path.join(nodeRoot, 'katex', 'dist', 'katex.min.css'));
+    // Inline KaTeX fonts as data URIs to avoid CSP/scheme fetches
+    css = css.replace(/url\(([^)]+)\)/g, (m, p1) => {
+        let ref = String(p1).trim().replace(/^['\"]|['\"]$/g, '');
+        if (!ref.startsWith('fonts/')) return m;
+        try {
+            const fontPath = path.join(fontsDir, ref.replace(/^fonts\//, ''));
+            const ext = path.extname(fontPath).toLowerCase();
+            const mime = ext === '.woff2' ? 'font/woff2'
+                : ext === '.woff' ? 'font/woff'
+                : ext === '.ttf' ? 'font/ttf'
+                : ext === '.otf' ? 'font/otf'
+                : 'application/octet-stream';
+            const bin = fs.readFileSync(fontPath);
+            const b64 = bin.toString('base64');
+            return `url('data:${mime};base64,${b64}')`;
+        } catch {
+            return m;
+        }
+    });
+    const marked = read(path.join(nodeRoot, 'marked', 'marked.min.js'));
+    const purify = read(path.join(nodeRoot, 'dompurify', 'dist', 'purify.min.js'));
+    const katex = read(path.join(nodeRoot, 'katex', 'dist', 'katex.min.js'));
+    const auto = read(path.join(nodeRoot, 'katex', 'dist', 'contrib', 'auto-render.min.js'));
+    return { katexCssHref: css, markedJsHref: marked, domPurifyJsHref: purify, katexJsHref: katex, autoRenderJsHref: auto };
 }

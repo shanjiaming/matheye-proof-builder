@@ -1,6 +1,5 @@
 example (n : Nat) : n + 0 = n := by
   have h1 : ¬ (n + 0 = n) := by sorry
-
   sorry
 
 
