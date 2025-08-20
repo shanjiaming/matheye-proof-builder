@@ -275,3 +275,8 @@ const action: 'admit' | 'deny' = normalized === 'deny' ? 'deny' : 'admit';
 - 阶段 2：结合 Paperproof 的 steps，完善编辑策略（追加/替换、精确范围）。
 - 阶段 3：引入 `suggestLemmaSignature`、统一 prettyPrint、变量/子表达式到源位置映射等高级功能。
 
+### TODO（优先级低）
+- 语义一致的唯一命名 RPC：`getUniqueName(base, pos)`
+  - Lean 侧根据插入点的 LocalContext 选择 `h_annotated_i` 中最小未用的 i，返回严格唯一的名字，避免前端文本扫描误判。
+  - 扩展侧在插入前调用，失败时回退到临时计数器，并提示用户。
+

@@ -29,6 +29,20 @@ export class CodeModifierService {
             }
 
             const edit = new vscode.WorkspaceEdit();
+            // Insert human_oracle macro at top if missing
+            const fullText = document.getText();
+            if (!fullText.includes('macro "human_oracle"')) {
+                let insertLine = 0;
+                const total = document.lineCount;
+                for (let ln = 0; ln < total; ln++) {
+                    const txt = document.lineAt(ln).text.trim();
+                    if (txt.length === 0) { insertLine = ln + 1; continue; }
+                    if (txt.startsWith('import ')) { insertLine = ln + 1; continue; }
+                    break;
+                }
+                const macroDef = 'macro "human_oracle" : tactic => `(tactic| sorry)\n\n';
+                edit.insert(document.uri, new vscode.Position(insertLine, 0), macroDef);
+            }
             const variableName = this.computeUniqueHypName(document, position);
             const normalized = (feedback.action || 'admit').trim();
             const action: 'admit' | 'deny' = normalized === 'deny' ? 'deny' : 'admit';
@@ -122,9 +136,9 @@ export class CodeModifierService {
 
         switch (action) {
             case 'admit':
-                return `have ${variableName} : ${prop} := by sorry\nexact ${variableName}\n`;
+                return `have ${variableName} : ${prop} := by human_oracle\nexact ${variableName}\n`;
             case 'deny':
-                return `have ${variableName} : ¬ (${prop}) := by sorry\n`;
+                return `have ${variableName} : ¬ (${prop}) := by human_oracle\n`;
             default:
                 throw new Error(`Unknown action: ${action}`);
         }
@@ -245,8 +259,8 @@ export class CodeModifierService {
                 taken.add(m[1]);
             }
         }
-        const base = 'h';
-        if (!taken.has(base)) return base;
+        const base = 'h_annotated_';
+        if (!taken.has(base)) return base + '1';
         let idx = 1;
         while (taken.has(base + idx)) idx++;
         return base + idx;
