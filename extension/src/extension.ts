@@ -24,7 +24,8 @@ export function activate(context: vscode.ExtensionContext) {
     const logInfo = (msg: string) => { if (logLevel() !== 'off' && logLevel() !== 'error') outputChannel.appendLine(msg); };
     const logError = (msg: string) => { if (logLevel() !== 'off') outputChannel.appendLine(msg); };
 
-    // (moved to module scope below)
+    // Cache heavy web assets once per activation
+    const cachedAssets = getLocalAssets();
     
     // Global state for webview panel
     let currentPanel: vscode.WebviewPanel | undefined = undefined;
@@ -148,7 +149,7 @@ export function activate(context: vscode.ExtensionContext) {
             }, () => {
                 // Clear global panel state when disposed
                 currentPanel = undefined;
-            }, currentPanel, translationService);
+            }, currentPanel, translationService, cachedAssets);
             
             logDebug(`Panel created/updated. currentPanel exists: ${!!currentPanel}`);
 
@@ -245,8 +246,15 @@ export function activate(context: vscode.ExtensionContext) {
                             translation: result.translated,
                             translationError: result.error
                         };
-                        try { currentPanel.webview.postMessage({ type: 'goals', count: currentGoals.length }); } catch {}
-                        currentPanel.webview.html = getWebviewContent(currentGoals, positionLocked, currentPosition, translationService.isTranslationEnabled(), getLocalAssets(), currentPanel.webview.cspSource);
+                        try {
+                          currentPanel.webview.postMessage({
+                            type: 'goalsData',
+                            goals: currentGoals,
+                            translationEnabled: translationService.isTranslationEnabled(),
+                            positionLocked,
+                            lockedLine: currentPosition?.line ?? null
+                          });
+                        } catch {}
                     } catch (error) {
                         logError(`Translation failed for goal: ${error}`);
                     }
@@ -255,16 +263,16 @@ export function activate(context: vscode.ExtensionContext) {
             
             currentPosition = position;
             try {
-                // Only update the HTML when the goal count or lock state changes to prevent flicker
-                try { currentPanel.webview.postMessage({ type: 'goals', count: currentGoals.length }); } catch {}
-                currentPanel.webview.html = getWebviewContent(
-                    currentGoals,
+                // Non-blocking incremental update via postMessage
+                try {
+                  currentPanel.webview.postMessage({
+                    type: 'goalsData',
+                    goals: currentGoals,
+                    translationEnabled: translationService.isTranslationEnabled(),
                     positionLocked,
-                    currentPosition,
-                    translationService.isTranslationEnabled(),
-                    getLocalAssets(),
-                    currentPanel.webview.cspSource
-                );
+                    lockedLine: currentPosition?.line ?? null
+                  });
+                } catch {}
             } catch (e) {
                 logDebug(`Webview update failed (maybe disposed): ${e}`);
                 currentPanel = undefined;
@@ -315,7 +323,8 @@ function createProofGoalsPanel(
     onFeedback: (message: UserFeedback) => Promise<void>,
     onDisposed: () => void,
     existingPanel?: vscode.WebviewPanel,
-    translationService?: TranslationService
+    translationService?: TranslationService,
+    assets?: { katexCssHref: string; markedJsHref: string; domPurifyJsHref: string; katexJsHref: string; autoRenderJsHref: string }
 ): vscode.WebviewPanel {
     // Reuse existing panel if available
     const panel = existingPanel || vscode.window.createWebviewPanel(
@@ -328,9 +337,9 @@ function createProofGoalsPanel(
         }
     );
 
-    // Set webview content
+    // Set webview content (once)
     const s0 = getState();
-    panel.webview.html = getWebviewContent(s0.goals, s0.positionLocked, s0.lockedPosition, translationService?.isTranslationEnabled(), getLocalAssets(), panel.webview.cspSource);
+    panel.webview.html = getWebviewContent(s0.goals, s0.positionLocked, s0.lockedPosition, translationService?.isTranslationEnabled(), assets ?? getLocalAssets(), panel.webview.cspSource);
 
     // Handle messages from webview
     panel.webview.onDidReceiveMessage((message) => {
@@ -338,11 +347,19 @@ function createProofGoalsPanel(
         onFeedback(message);
     }, undefined, context.subscriptions);
 
-    // Refresh when panel becomes visible again
+    // Refresh when panel becomes visible again (incremental render)
     panel.onDidChangeViewState(() => {
         // Trigger a refresh using latest known state
         const s = getState();
-        panel.webview.html = getWebviewContent(s.goals, s.positionLocked, s.lockedPosition, translationService?.isTranslationEnabled(), getLocalAssets(), panel.webview.cspSource);
+        try {
+          panel.webview.postMessage({
+            type: 'goalsData',
+            goals: s.goals,
+            translationEnabled: translationService?.isTranslationEnabled() ?? false,
+            positionLocked: s.positionLocked,
+            lockedLine: s.lockedPosition?.line ?? null
+          });
+        } catch {}
     }, null, context.subscriptions);
 
     // Handle panel disposal
@@ -497,7 +514,9 @@ function getWebviewContent(
             </div>
             <p>共发现 ${goals.length} 个待证目标。</p>
             ${goals.length === 0 ? `<p>当前光标位置没有待证目标。移动光标或编辑代码后将自动刷新。</p>` : `<p>请对每个目标给出反馈：</p>`}
+            <div id="goals-root">
             ${goalsHtml}
+            </div>
             
             ${assets ? `<script>${assets.markedJsHref}</script>` : ''}
             ${assets ? `<script>${assets.domPurifyJsHref}</script>` : ''}
@@ -533,6 +552,60 @@ function getWebviewContent(
                         console.log('Translation button text:', translationBtn.textContent);
                     }
                 });
+                function buildGoalHtml(goal, index, translationEnabled) {
+                  const hasTranslation = !!translationEnabled;
+                  const isError = !!goal.translationError;
+                  const rawText = goal.translation ? goal.translation : (isError ? '' : '翻译中...');
+                  const dataRaw = (!isError && hasTranslation) ? ('data-raw="' + encodeURIComponent(rawText) + '"') : '';
+                  const translationBlock = hasTranslation
+                    ? ('<div class="goal-section">'
+                      + '<div class="goal-section-title">自然语言：</div>'
+                      + '<div class="goal-translation ' + (isError ? 'error' : '') + '" ' + dataRaw + '>'
+                      + (goal.translationError || (goal.translation ? '' : '翻译中...'))
+                      + '</div>'
+                      + '</div>')
+                    : '';
+                  const goalName = goal.name ? goal.name : ('Goal ' + (index + 1));
+                  return (
+                    '<div class="goal">'
+                    + '<div class="goal-header">'
+                    + '<span class="goal-name">' + goalName + '</span>'
+                    + '</div>'
+                    + '<div class="goal-content">'
+                    + '<div class="goal-section">'
+                    + '<div class="goal-section-title">Lean 表示：</div>'
+                    + '<div class="goal-type">' + goal.type + '</div>'
+                    + '</div>'
+                    + translationBlock
+                    + '</div>'
+                    + '<div class="actions">'
+                    + '<button onclick="sendFeedback(' + index + ', \"admit\")" class="btn admit">✓ 正确</button>'
+                    + '<button onclick="sendFeedback(' + index + ', \"deny\")" class="btn deny">✗ 错误</button>'
+                    + '</div>'
+                    + '</div>'
+                  );
+                }
+
+                function renderGoalsData(data) {
+                  const root = document.getElementById('goals-root');
+                  if (!root) return;
+                  const goals = Array.isArray(data.goals) ? data.goals : [];
+                  const html = goals.map((g, i) => buildGoalHtml(g, i, !!data.translationEnabled)).join('');
+                  root.innerHTML = html;
+                  // update toolbar lock state label/info if provided
+                  if (typeof data.positionLocked === 'boolean') {
+                    const btn = document.querySelector('.btn.lock');
+                    if (btn) btn.textContent = data.positionLocked ? '▶ 解除固定' : '⏸ 固定光标';
+                    const info = document.querySelector('.lock-info');
+                    if (info) info.textContent = (data.positionLocked && data.lockedLine != null) ? ('已固定于第 ' + (data.lockedLine + 1) + ' 行') : '';
+                  }
+                  if (typeof data.translationEnabled === 'boolean') {
+                    const tbtn = document.querySelector('.btn.translation');
+                    if (tbtn) tbtn.textContent = data.translationEnabled ? '🌐 关闭翻译' : '🌐 开启翻译';
+                  }
+                  renderTranslations();
+                }
+
                 window.addEventListener('message', function(event) {
                   const msg = event.data;
                   if (msg && msg.type === 'lockState') {
@@ -544,6 +617,9 @@ function getWebviewContent(
                   if (msg && msg.type === 'translationState') {
                     const btn = document.querySelector('.btn.translation');
                     if (btn) btn.textContent = msg.enabled ? '🌐 关闭翻译' : '🌐 开启翻译';
+                  }
+                  if (msg && msg.type === 'goalsData') {
+                    renderGoalsData(msg);
                   }
                 });
 

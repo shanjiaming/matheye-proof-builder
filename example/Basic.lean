@@ -3,6 +3,6 @@ example (n : Nat) : n + 0 = n := by
   sorry
 
 
-example (P Q : Prop) : P ∧ Q → P := by
-  intro h
-  have h : ¬ (P) := by sorry
+example (h Q : Prop) : h ∧ Q <-> h := by
+
+  have : h ∧ Q <-> h := by

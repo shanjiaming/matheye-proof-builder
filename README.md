@@ -217,3 +217,61 @@ const action: 'admit' | 'deny' = normalized === 'deny' ? 'deny' : 'admit';
 - Lean 侧提供插入策略（`getInsertionSpec`）→ 统一“替换 sorry / 追加尾部”。
 - 统一 prettyPrint → 消除前端去糖与格式分歧。
 
+
+---
+
+## 附录：结构化上下文与外部项目整合（规划草案）
+
+以下为后续实现所需的技术路线与集成方案，仅做规划记录，暂不落地实现。
+
+### 目标与可行性
+- 目标：从“字符串的前提和 goal”升级到“结构化上下文 + 语义 AST”，拿到每个变量的类型、依赖关系、源位置，并可稳定序列化，支持后续智能编辑与分析。
+- 可行性：Lean elaboration 产出的 InfoTree 与 Meta 层能提供全部所需（`LocalContext`、`Expr`、`Syntax`、位置），适合在 Lean 侧通过 RPC 暴露 JSON 结构给前端。
+
+### 建议的 Lean 侧 RPC：getStructuredContext(pos)
+- 输入：`pos: LSP.Position`
+- 输出（JSON 形状建议）：
+  - `tacticRange`: `{ start, stop }`（当前 tactic 的 LSP 范围）
+  - `goal`: `{ pretty: string, freeVars: string[] }`（pretty 供展示，freeVars 来自 `Expr.collectFVars`）
+  - `locals`: `[{ name, typePretty, binderInfo, isLet, dependsOn: string[] }]`（从 `LocalContext` 提取，`dependsOn` 基于 `collectFVars`）
+- 实现要点：
+  - `withWaitFindSnapAtPos` → `infoTree.goalsAt?` 找到 `TacticInfo`
+  - 在 `TacticInfo.runMetaM` 中读取 `goal`/`LocalContext`、序列化 `Expr`（见下）与 pretty 打印
+  - `Syntax` 位置信息用 `stx.getRange?` + `FileMap` 转 LSP
+
+### Expr 序列化（机器可分析）
+- 不直接吐 Lean 内部 `Expr`；定义轻量 JSON AST（节点如 `const/app/lam/forall/letE/fvar/bvar/lit/proj` 等）。
+- 去循环可选；体量控制：限制深度/节点数，超限做截断标记。
+- 展示用 `pretty`（delab/pp），分析用 `Expr JSON`；两者并存，避免 delab 失真影响分析。
+
+### 变量依赖与关联
+- 对 `LocalDecl.type` 与 `goal.type` 执行 `collectFVars`，映射到局部名，得到：
+  - `dependsOn(local)` 图：某局部类型依赖哪些局部
+  - `goal.freeVars`：目标中用到哪些局部
+- 可反向索引：某局部被谁引用。
+
+### 性能与稳定性
+- 仅围绕“当前 tactic”构建上下文，限制 JSON 深度与节点数；对大表达式标注“截断”。
+- 用 `CheckIfUserIsStillTyping`（Paperproof 思路）规避不稳定 InfoTree。
+
+### 与外部项目的整合（不立即实现）
+- jixia（`../jixia`）：
+  - 已有 `collectFVars`、InfoTree/Meta 访问、elab/decl JSON 等分析基础。
+  - 方案：在 jixia 侧添加 `@[server_rpc_method] getStructuredContext`，输出上文 JSON；或将其 Analyzer 作为 Lean 包引入本项目，由本项目暴露 RPC。
+- Paperproof（`../paperproof`）：
+  - 已有 `@[server_rpc_method] Paperproof.getSnapshotData`，基于增强版 `goalsAt?` 与 `BetterParser` 产出结构化 proof steps（goal before/after、依赖、位置等）。
+  - 方案：前端并发请求：
+    - `Paperproof.getSnapshotData`：驱动步骤视图（用户熟悉的语义行为）
+    - `MathEye.getStructuredContext`（本项目或 jixia 提供）：补充 Meta 级上下文（locals/dependsOn/Expr）
+  - 翻译/耗时分析维持异步，不阻塞 UI；先渲染结构，再渐进填充。
+
+### 前端使用建议（保持非阻塞）
+- 仍可用 `$ /lean/plainGoal` 快速显示 goal。
+- 并发获取结构（Paperproof steps + structured context），优先渲染结构；翻译等异步更新“翻译中…”。
+- 变量点击/hover 用 `dependsOn/freeVars` 做高亮与依赖图。
+
+### 阶段性路线
+- 阶段 1：实现 `getStructuredContext`（tacticRange、goal.pretty/freeVars、locals+dependsOn）。
+- 阶段 2：结合 Paperproof 的 steps，完善编辑策略（追加/替换、精确范围）。
+- 阶段 3：引入 `suggestLemmaSignature`、统一 prettyPrint、变量/子表达式到源位置映射等高级功能。
+
