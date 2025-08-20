@@ -579,8 +579,8 @@ function getWebviewContent(
                     + translationBlock
                     + '</div>'
                     + '<div class="actions">'
-                    + '<button onclick="sendFeedback(' + index + ', \"admit\")" class="btn admit">✓ 正确</button>'
-                    + '<button onclick="sendFeedback(' + index + ', \"deny\")" class="btn deny">✗ 错误</button>'
+                    + '<button class="btn admit" data-idx="' + index + '">✓ 正确</button>'
+                    + '<button class="btn deny" data-idx="' + index + '">✗ 错误</button>'
                     + '</div>'
                     + '</div>'
                   );
@@ -603,6 +603,19 @@ function getWebviewContent(
                     const tbtn = document.querySelector('.btn.translation');
                     if (tbtn) tbtn.textContent = data.translationEnabled ? '🌐 关闭翻译' : '🌐 开启翻译';
                   }
+                  // Attach click handlers (avoid inline onclick to prevent quoting issues)
+                  root.querySelectorAll('.btn.admit').forEach((btn) => {
+                    btn.addEventListener('click', () => {
+                      const idx = parseInt(btn.getAttribute('data-idx') || '0', 10);
+                      sendFeedback(idx, 'admit');
+                    });
+                  });
+                  root.querySelectorAll('.btn.deny').forEach((btn) => {
+                    btn.addEventListener('click', () => {
+                      const idx = parseInt(btn.getAttribute('data-idx') || '0', 10);
+                      sendFeedback(idx, 'deny');
+                    });
+                  });
                   renderTranslations();
                 }
 
