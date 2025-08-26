@@ -93,6 +93,21 @@ An interactive, low‑code proof builder for Lean 4. This README explains how t
   - deny：`have h : ¬ (<goal>) := by sorry`
 - 不自动替换 `sorry`（将来由 `getInsertionSpec` 决定）。
 
+### 光标模式（Cursor Modes）
+
+- **概述**：提供三种光标模式，用于决定“获取目标的位置”和“应用编辑（✓/✗）的位置/范围”。
+- **模式**：
+  - **当前光标（Current）**：按实际光标位置获取目标并插入编辑。
+  - **By 块开始（By Start）**：将逻辑光标视为在当前 by 块的 `by` 之后；对 ✓/✗ 可能删除从 by 开始到块尾的内容后再插入。
+  - **By 块末尾（By End）**：将逻辑光标视为在当前 by 块末尾；通常直接在块尾插入。
+- **切换方式**：
+  - Webview 按钮：点击面板中的光标模式按钮循环切换。
+  - 命令面板：运行 “Cycle Cursor Mode”。
+  - 快捷键：为命令 `matheye.cycleCursorMode` 配置键位。
+- **与编辑策略的关系**：仅影响“目标显示”和“插入/删除范围”；生成的 admit/deny 片段与缩进规则仍遵循上文的前端编辑策略。
+- **故障排除**：若 By 模式识别异常，确认光标位于有效 by 块内，或切回“当前光标”模式。
+- **实现参考**：`extension/src/services/cursorModeManager.ts`。
+
 ---
 
 ### 反繁饰与一致性

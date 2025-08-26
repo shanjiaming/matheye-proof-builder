@@ -4,7 +4,9 @@ import * as fs from 'fs';
 import { LeanClientService } from './services/leanClient';
 import { CodeModifierService } from './services/codeModifier';
 import { TranslationService } from './services/translationService';
+import { CursorModeManager } from './services/cursorModeManager';
 import { ProofGoal, UserFeedback } from './types';
+import { CursorMode } from './types/cursorModes';
 
 /**
  * Main extension entry point
@@ -16,6 +18,7 @@ export function activate(context: vscode.ExtensionContext) {
     const leanClient = new LeanClientService();
     const codeModifier = new CodeModifierService();
     const translationService = new TranslationService();
+    const cursorModeManager = new CursorModeManager(context);
     const outputChannel = vscode.window.createOutputChannel("MathEye");
     const config = () => vscode.workspace.getConfiguration();
     const logLevel = () => (config().get<string>('matheye.logLevel', 'error')) as 'off'|'error'|'info'|'debug';
@@ -109,6 +112,17 @@ export function activate(context: vscode.ExtensionContext) {
                     }
                     return;
                 }
+                if (message.action === 'cycleCursorMode') {
+                    logInfo('Cycle cursor mode requested');
+                    const nextMode = cursorModeManager.cycleMode();
+                    const config = cursorModeManager.getModeConfig(nextMode);
+                    vscode.window.showInformationMessage(
+                        `光标模式切换为: ${config.label} - ${config.description}`
+                    );
+                    // 刷新目标显示
+                    await updateProofGoals(editorNow);
+                    return;
+                }
                 if (message.action === 'toggleTranslation') {
                     logInfo('Toggle translation requested');
                     try {
@@ -139,17 +153,30 @@ export function activate(context: vscode.ExtensionContext) {
                     return;
                 }
                 const goalsNow = currentGoals;
-                // Ask Lean for canonical insertion point (avoid regex-based heuristics)
-                leanClient.getInsertionPoint(posNow, editorNow.document).then((insPos) => {
-                    const rawAction = (message.action || '').trim();
-                    const act = rawAction === 'admit' ? 'admit' : 'deny';
-                    outputChannel.appendLine(`[Feedback] resolvedAction=${act}, insertAt=(${insPos.line},${insPos.character})`);
-                    codeModifier.applyFeedback(editorNow.document, goalsNow, { goalIndex: message.goalIndex, action: act }, insPos, { useExactPosition: true });
-                });
+                // 使用“逻辑光标”对齐 by 块规则，避免实际插入点造成的不一致
+                const logicalResult = cursorModeManager.calculateLogicalCursor(posNow, editorNow.document);
+                const deleteRange = cursorModeManager.calculateDeleteRange(posNow, editorNow.document);
+                
+                const rawAction = (message.action || '').trim();
+                const act = rawAction === 'admit' ? 'admit' : 'deny';
+                
+                outputChannel.appendLine(`[Feedback] resolvedAction=${act}, logicalCursor=(${logicalResult.position.line},${logicalResult.position.character}), mode=${logicalResult.mode}`);
+                if (deleteRange) {
+                    outputChannel.appendLine(`[Feedback] deleteRange=[(${deleteRange.start.line},${deleteRange.start.character}) to (${deleteRange.end.line},${deleteRange.end.character})]`);
+                }
+                
+                // 使用修改后的applyFeedback方法，传递删除范围和逻辑光标信息
+                codeModifier.applyFeedbackWithLogicalCursor(
+                    editorNow.document, 
+                    goalsNow, 
+                    { goalIndex: message.goalIndex, action: act }, 
+                    logicalResult,
+                    deleteRange
+                );
             }, () => {
                 // Clear global panel state when disposed
                 currentPanel = undefined;
-            }, currentPanel, translationService, cachedAssets);
+            }, currentPanel, translationService, cursorModeManager, cachedAssets);
             
             logDebug(`Panel created/updated. currentPanel exists: ${!!currentPanel}`);
 
@@ -161,6 +188,20 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     // Register command: Analyze Proof Goals (simplified version)
+    // Register command: Toggle Cursor Mode
+    let cycleCursorModeCommand = vscode.commands.registerCommand('matheye.cycleCursorMode', async () => {
+        const nextMode = cursorModeManager.cycleMode();
+        const config = cursorModeManager.getModeConfig(nextMode);
+        vscode.window.showInformationMessage(
+            `光标模式切换为: ${config.label} - ${config.description}`
+        );
+        
+        // 如果webview已打开，刷新显示
+        if (currentPanel && currentEditor) {
+            await updateProofGoals(currentEditor);
+        }
+    });
+
     let analyzeCommand = vscode.commands.registerCommand('matheye.analyzeProofGoals', async () => {
         const editor = vscode.window.activeTextEditor;
         if (!editor || editor.document.languageId !== 'lean4') {
@@ -214,7 +255,11 @@ export function activate(context: vscode.ExtensionContext) {
         cancellationToken = new vscode.CancellationTokenSource();
 
         try {
-            const position = positionLocked && currentPosition ? currentPosition : textEditor.selection.active;
+            // 计算逻辑光标位置
+            const actualPosition = positionLocked && currentPosition ? currentPosition : textEditor.selection.active;
+            const logicalResult = cursorModeManager.calculateLogicalCursor(actualPosition, textEditor.document);
+            const position = logicalResult.position;
+            const cursorModeLabelNow = cursorModeManager.getModeConfig(logicalResult.mode).label;
             logDebug(`Updating goals at line ${position.line}, char ${position.character}`);
             
             const response = await leanClient.getProofGoals(position, textEditor.document);
@@ -252,7 +297,8 @@ export function activate(context: vscode.ExtensionContext) {
                             goals: currentGoals,
                             translationEnabled: translationService.isTranslationEnabled(),
                             positionLocked,
-                            lockedLine: currentPosition?.line ?? null
+                            lockedLine: currentPosition?.line ?? null,
+                            cursorModeLabel: cursorModeLabelNow
                           });
                         } catch {}
                     } catch (error) {
@@ -270,7 +316,8 @@ export function activate(context: vscode.ExtensionContext) {
                     goals: currentGoals,
                     translationEnabled: translationService.isTranslationEnabled(),
                     positionLocked,
-                    lockedLine: currentPosition?.line ?? null
+                    lockedLine: currentPosition?.line ?? null,
+                    cursorModeLabel: cursorModeLabelNow
                   });
                 } catch {}
             } catch (e) {
@@ -304,6 +351,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(
         startProofBuilderCommand,
+        cycleCursorModeCommand,
         analyzeCommand,
         onActiveEditorChange,
         onSelectionChange,
@@ -324,6 +372,7 @@ function createProofGoalsPanel(
     onDisposed: () => void,
     existingPanel?: vscode.WebviewPanel,
     translationService?: TranslationService,
+    cursorModeManager?: CursorModeManager,
     assets?: { katexCssHref: string; markedJsHref: string; domPurifyJsHref: string; katexJsHref: string; autoRenderJsHref: string }
 ): vscode.WebviewPanel {
     // Reuse existing panel if available
@@ -339,7 +388,15 @@ function createProofGoalsPanel(
 
     // Set webview content (once)
     const s0 = getState();
-    panel.webview.html = getWebviewContent(s0.goals, s0.positionLocked, s0.lockedPosition, translationService?.isTranslationEnabled(), assets ?? getLocalAssets(), panel.webview.cspSource);
+    panel.webview.html = getWebviewContent(
+        s0.goals,
+        s0.positionLocked,
+        s0.lockedPosition,
+        translationService?.isTranslationEnabled(),
+        cursorModeManager?.getCurrentMode(),
+        assets ?? getLocalAssets(),
+        panel.webview.cspSource
+    );
 
     // Handle messages from webview
     panel.webview.onDidReceiveMessage((message) => {
@@ -378,11 +435,22 @@ function getWebviewContent(
     positionLocked: boolean,
     lockedPos?: vscode.Position,
     translationEnabled?: boolean,
+    cursorMode?: CursorMode,
     assets?: { katexCssHref: string; markedJsHref: string; domPurifyJsHref: string; katexJsHref: string; autoRenderJsHref: string },
     cspSource?: string
 ): string {
     const lockLabel = positionLocked ? '▶ 解除固定' : '⏸ 固定光标';
     const translationLabel = translationEnabled ? '🌐 关闭翻译' : '🌐 开启翻译';
+    
+    // 获取光标模式标签
+    const cursorModeLabel = (() => {
+        switch (cursorMode) {
+            case CursorMode.CURRENT: return '📍 当前光标';
+            case CursorMode.BY_START: return '🎯 By块开始';
+            case CursorMode.BY_END: return '🏁 By块末尾';
+            default: return '📍 当前光标';
+        }
+    })();
     const lockInfo = positionLocked && lockedPos ? `<span class="lock-info">已固定于第 ${lockedPos.line + 1} 行</span>` : '';
     const goalsHtml = goals.map((goal, index) => {
         const hasTranslation = !!translationEnabled;
@@ -492,6 +560,7 @@ function getWebviewContent(
                 .btn.deny { background: #dc3545; color: white; }
                 .btn:hover { opacity: 0.8; }
                 .btn.lock { background: #6c757d; color: white; margin-left: 10px; }
+                .btn.cursor-mode { background: #17a2b8; color: white; margin-right: 10px; }
                 .btn.translation { background: #007acc; color: white; margin-right: 10px; }
                 .toolbar { display: flex; align-items: center; justify-content: space-between; }
                 .lock-info { color: var(--vscode-descriptionForeground); margin-left: 10px; }
@@ -507,6 +576,9 @@ function getWebviewContent(
             <div class="toolbar">
               <h1>MathEye 证明构建器</h1>
               <div>
+                <button onclick="cycleCursorMode()" class="btn cursor-mode">
+                  ${cursorModeLabel}
+                </button>
                 <button onclick="toggleTranslation()" class="btn translation">${translationLabel}</button>
                 <button onclick="toggleLock()" class="btn lock">${lockLabel}</button>
                 ${lockInfo}
@@ -537,6 +609,10 @@ function getWebviewContent(
                 function toggleLock() {
                     console.log('toggleLock called');
                     vscode.postMessage({ goalIndex: -1, action: 'toggleLock' });
+                }
+                function cycleCursorMode() {
+                    console.log('cycleCursorMode called');
+                    vscode.postMessage({ goalIndex: -1, action: 'cycleCursorMode' });
                 }
                 function toggleTranslation() {
                     console.log('toggleTranslation clicked');
@@ -603,6 +679,12 @@ function getWebviewContent(
                     const tbtn = document.querySelector('.btn.translation');
                     if (tbtn) tbtn.textContent = data.translationEnabled ? '🌐 关闭翻译' : '🌐 开启翻译';
                   }
+                  // Update cursor mode label if provided
+                  if (typeof data.cursorModeLabel === 'string') {
+                    const cbtn = document.querySelector('.btn.cursor-mode');
+                    if (cbtn) cbtn.textContent = data.cursorModeLabel;
+                  }
+
                   // Attach click handlers (avoid inline onclick to prevent quoting issues)
                   root.querySelectorAll('.btn.admit').forEach((btn) => {
                     btn.addEventListener('click', () => {

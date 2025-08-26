@@ -18,5 +18,5 @@ export interface MathEyeRpcOutputParams {
 
 export interface UserFeedback {
   goalIndex: number;
-  action: 'admit' | 'deny' | 'toggleLock' | 'toggleTranslation';
+  action: 'admit' | 'deny' | 'toggleLock' | 'toggleTranslation' | 'cycleCursorMode';
 }

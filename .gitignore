@@ -27,3 +27,6 @@ pnpm-debug.log*
 # Misc
 *.swp
 *.swo
+
+test-workspace/
+CLAUDE.md
