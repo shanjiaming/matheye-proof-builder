@@ -56,20 +56,20 @@ export class HistoryManager {
 
         const operation = operations[operations.length - 1]; // Get the latest operation
 
-        // Basic synchronous checks
+        // Strict checks only
         try {
             // Check if document URI matches
             if (document.uri.toString() !== operation.documentUri) {
                 return false;
             }
 
-            // Check if the by block range is still within document bounds
+            // Check if the by block range is still within document bounds (strict)
             const currentRange = operation.byBlockRange;
             if (currentRange.start.line >= document.lineCount || currentRange.end.line >= document.lineCount) {
                 return false;
             }
 
-            // This is a basic check - the full validation happens in validateOperation
+            // This is a basic but strict check
             return true;
             
         } catch (error) {

@@ -183,13 +183,16 @@ export function activate(context: vscode.ExtensionContext) {
                 }
                 
                 // 使用修改后的applyFeedback方法，传递删除范围和逻辑光标信息
-                codeModifier.applyFeedbackWithLogicalCursor(
+                await codeModifier.applyFeedbackWithLogicalCursor(
                     editorNow.document, 
                     goalsNow, 
                     { goalIndex: message.goalIndex, action: act }, 
                     logicalResult,
                     deleteRange
                 );
+                
+                // 代码插入完成后，立即更新goals显示
+                setTimeout(() => updateProofGoals(editorNow), 100);
             }, () => {
                 // Clear global panel state when disposed
                 currentPanel = undefined;
@@ -253,7 +256,7 @@ export function activate(context: vscode.ExtensionContext) {
         logDebug(`currentPanel exists: ${!!currentPanel}`);
         logDebug(`textEditor exists: ${!!textEditor}`);
         logDebug(`textEditor language: ${textEditor?.document?.languageId || 'none'}`);
-        
+
         // Only update if we have an active panel (like Paperproof)
         if (!currentPanel || !textEditor) {
             logDebug("No panel or editor, skipping update");
