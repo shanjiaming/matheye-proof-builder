@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { ProofGoal, UserFeedback } from '../types';
 import { LogicalCursorResult } from '../types/cursorModes';
+import { HistoryManager, HistoryOperation } from './historyManager';
 
 /**
  * Service for modifying Lean source code based on user feedback on proof goals
@@ -8,9 +9,11 @@ import { LogicalCursorResult } from '../types/cursorModes';
 export class CodeModifierService {
     private outputChannel: vscode.OutputChannel;
     private nextVariableIndex: number = 1;
+    private historyManager: HistoryManager;
 
     constructor() {
         this.outputChannel = vscode.window.createOutputChannel("MathEye CodeModifier");
+        this.historyManager = new HistoryManager();
     }
 
     /**
@@ -23,7 +26,28 @@ export class CodeModifierService {
         logicalCursor: LogicalCursorResult,
         deleteRange?: vscode.Range
     ): Promise<boolean> {
+        vscode.window.showInformationMessage(`🔥 DEBUG: applyFeedbackWithLogicalCursor called with action: ${feedback.action}`);
         try {
+            // Use the by block info from logical cursor - no need to search!
+            const byBlockInfo = logicalCursor.byBlock 
+                ? {
+                    // Include the complete by block from the line containing 'by' keyword
+                    range: new vscode.Range(
+                        new vscode.Position(logicalCursor.byBlock.byPosition.line, 0),
+                        logicalCursor.byBlock.endPosition
+                    ),
+                    content: document.getText(new vscode.Range(
+                        new vscode.Position(logicalCursor.byBlock.byPosition.line, 0),
+                        logicalCursor.byBlock.endPosition
+                    ))
+                }
+                : null;
+            if (byBlockInfo) {
+                vscode.window.showInformationMessage(`🔥 DEBUG: 备份内容: "${byBlockInfo.content}"`);
+            } else {
+                vscode.window.showInformationMessage(`🔥 DEBUG: byBlockInfo = null - no by block`);
+            }
+            
             // Normalize delete start: if prefix (0..start) is whitespace-only, start from column 0
             let insertionPosition = logicalCursor.position;
             if (deleteRange && !deleteRange.start.isEqual(deleteRange.end)) {
@@ -37,13 +61,33 @@ export class CodeModifierService {
                     }
                 } catch {}
                 // Use replaceRange to avoid intermediate empty lines and to ensure atomicity
-                return await this.applyFeedback(
+                const success = await this.applyFeedback(
                     document,
                     goals,
                     feedback,
                     insertionPosition,
                     { replaceRange: deleteRange }
                 );
+                
+                // Record history if backup was successful and operation succeeded
+                if (success && byBlockInfo) {
+                    const normalized = (feedback.action || 'admit').trim();
+                    const action: 'admit' | 'deny' = normalized === 'deny' ? 'deny' : 'admit';
+                    const historyOperation: HistoryOperation = {
+                        type: action,
+                        goalIndex: feedback.goalIndex,
+                        byBlockRange: byBlockInfo.range,
+                        originalByBlockContent: byBlockInfo.content,
+                        timestamp: Date.now(),
+                        documentUri: document.uri.toString()
+                    };
+                    this.historyManager.recordOperation(historyOperation);
+                    vscode.window.showInformationMessage(`🔥 DEBUG: 已记录 ${action} 操作历史记录`);
+                } else if (success) {
+                    this.outputChannel.appendLine(`[DEBUG] No byBlockInfo, history not recorded (deleteRange path)`);
+                }
+                
+                return success;
             }
 
             // Determine canonical insertion anchor within by-block to avoid stray blank lines
@@ -64,15 +108,35 @@ export class CodeModifierService {
                 } catch {}
             }
 
+            // byBlockInfo already declared at the beginning of the method
+            
             // Insert at canonical position with exact placement
             const ok = await this.applyFeedback(
                 document,
                 goals,
                 feedback,
                 finalInsertPos,
-                { useExactPosition: true }
+                { useExactPosition: true, replaceRange: deleteRange }
             );
             if (!ok) return false;
+            
+            // Record the by block backup after successful insertion
+            if (byBlockInfo) {
+                const normalized = (feedback.action || 'admit').trim();
+                const action: 'admit' | 'deny' = normalized === 'deny' ? 'deny' : 'admit';
+                const historyOperation: HistoryOperation = {
+                        type: action,
+                        goalIndex: feedback.goalIndex,
+                        byBlockRange: byBlockInfo.range,
+                        originalByBlockContent: byBlockInfo.content,
+                        timestamp: Date.now(),
+                        documentUri: document.uri.toString()
+                    };
+                this.historyManager.recordOperation(historyOperation);
+                this.outputChannel.appendLine(`[DEBUG] Recorded history for ${action} operation`);
+            } else {
+                this.outputChannel.appendLine(`[DEBUG] No byBlockInfo, history not recorded`);
+            }
 
             // After insertion, trim any accidental extra blank lines at the insertion site
             try {
@@ -225,6 +289,155 @@ export class CodeModifierService {
 
     private applyIndent(indent: string, text: string): string {
         return text.split('\n').map(line => (line.length > 0 ? indent + line : line)).join('\n');
+    }
+
+    /**
+     * Calculate the range where text was inserted for history tracking
+     */
+    private calculateInsertionRange(
+        document: vscode.TextDocument,
+        position: vscode.Position,
+        options?: { useExactPosition?: boolean; replaceRange?: vscode.Range }
+    ): vscode.Range {
+        if (options?.replaceRange) {
+            return options.replaceRange;
+        }
+        
+        // For other cases, estimate based on position
+        // This is a rough estimate since the exact range depends on insertion logic
+        const estimatedEndLine = position.line + 2; // Most have blocks span 2-3 lines
+        const estimatedEnd = new vscode.Position(
+            Math.min(estimatedEndLine, document.lineCount - 1),
+            0
+        );
+        
+        return new vscode.Range(position, estimatedEnd);
+    }
+
+    /**
+     * Get the original text that will be replaced/overwritten
+     */
+    private getOriginalText(
+        document: vscode.TextDocument,
+        position: vscode.Position,
+        options?: { useExactPosition?: boolean; replaceRange?: vscode.Range }
+    ): string {
+        if (options?.replaceRange) {
+            // If we're replacing a specific range, get the text in that range
+            return document.getText(options.replaceRange);
+        }
+        
+        // For insertions, we need to capture what might be overwritten
+        // This is tricky because the insertion logic is complex
+        
+        // Try to get the current line and any following content that might be affected
+        const currentLine = Math.min(position.line, document.lineCount - 1);
+        const lineText = document.lineAt(currentLine).text;
+        
+        // If we're at the end of a line, capture the rest of the line
+        const restOfLine = lineText.slice(position.character);
+        
+        // Also check if there are subsequent lines that might be affected
+        let captureEnd = currentLine;
+        for (let i = currentLine + 1; i < Math.min(document.lineCount, currentLine + 3); i++) {
+            const nextLineText = document.lineAt(i).text.trim();
+            if (nextLineText === '' || nextLineText.startsWith('--')) {
+                continue;
+            }
+            // If we find a line with content, it might be affected
+            if (nextLineText.match(/^(exact|apply|rw|simp|sorry)/)) {
+                captureEnd = i;
+                break;
+            }
+        }
+        
+        // Create range from current position to end of potentially affected area
+        const captureRange = new vscode.Range(
+            position,
+            new vscode.Position(captureEnd, document.lineAt(captureEnd).text.length)
+        );
+        
+        return document.getText(captureRange);
+    }
+
+    /**
+     * Rollback the operation for a specific goal
+     */
+    async rollbackOperation(document: vscode.TextDocument, goalIndex: number): Promise<boolean> {
+        try {
+            this.outputChannel.appendLine(`[ROLLBACK] Starting rollback for goal ${goalIndex}`);
+            if (!this.historyManager.canRollback(goalIndex)) {
+                this.outputChannel.appendLine(`[ROLLBACK] No operation available to rollback for goal ${goalIndex}`);
+                vscode.window.showInformationMessage(`目标 ${goalIndex} 没有可回滚的操作`);
+                return false;
+            }
+
+            // Validate that the operation is still valid
+            const isValid = await this.historyManager.validateOperation(document, goalIndex);
+            if (!isValid) {
+                vscode.window.showWarningMessage('无法回滚：代码已被修改');
+                return false;
+            }
+
+            const operation = this.historyManager.getOperation(goalIndex);
+            if (!operation) {
+                return false;
+            }
+
+            // Find the current by block range (which may be different from the original range)
+            // We need to find the current complete by block and replace it entirely
+            const currentPosition = operation.byBlockRange.start;
+            
+            // We need to use an external way to get current by block info
+            // For now, let's use a simpler approach: find by scanning from the original position
+            const currentByBlockRange = await this.findCurrentByBlockRange(document, operation.byBlockRange);
+            
+            if (!currentByBlockRange) {
+                vscode.window.showErrorMessage('无法找到当前by块进行回滚');
+                return false;
+            }
+            
+            const currentByBlockContent = document.getText(currentByBlockRange);
+            
+            vscode.window.showInformationMessage(`🔄 当前by块: "${currentByBlockContent.substring(0, 50)}..."`);
+            vscode.window.showInformationMessage(`🔄 原始by块: "${operation.originalByBlockContent.substring(0, 50)}..."`);
+            
+            // Replace the current complete by block with the original content
+            const edit = new vscode.WorkspaceEdit();
+            edit.replace(document.uri, currentByBlockRange, operation.originalByBlockContent);
+
+            const success = await vscode.workspace.applyEdit(edit);
+
+            if (success) {
+                this.outputChannel.appendLine(`Rolled back ${operation.type} operation for goal ${goalIndex}`);
+                this.historyManager.clearOperation(goalIndex);
+                vscode.window.showInformationMessage(`成功回滚目标 ${goalIndex} 的操作`);
+            } else {
+                this.outputChannel.appendLine(`Failed to rollback operation for goal ${goalIndex}`);
+            }
+
+            return success;
+
+        } catch (error) {
+            const errorMsg = `Error during rollback: ${error}`;
+            this.outputChannel.appendLine(errorMsg);
+            vscode.window.showErrorMessage(errorMsg);
+            return false;
+        }
+    }
+
+    /**
+     * 检查指定目标是否有历史记录可以回滚
+     */
+    canRollbackGoal(goalIndex: number): boolean {
+        return this.historyManager.canRollback(goalIndex);
+    }
+
+    /**
+     * Check if rollback is available for a specific goal
+     */
+    canRollback(goalIndex: number): boolean {
+        return this.historyManager.canRollback(goalIndex);
     }
 
     /**
@@ -439,7 +652,57 @@ export class CodeModifierService {
         this.outputChannel.show();
     }
 
+    /**
+     * Find the current by block range by scanning from a position
+     */
+    private async findCurrentByBlockRange(document: vscode.TextDocument, originalRange: vscode.Range): Promise<vscode.Range | null> {
+        const byRegex = /\bby\b/;
+        const total = document.lineCount;
+        
+        // Look for the by block that starts at or near the original range start
+        // The original range start should be the 'by' keyword line
+        const searchStartLine = originalRange.start.line;
+        
+        // Check if there's still a 'by' at the original position
+        if (searchStartLine < total) {
+            const originalLine = document.lineAt(searchStartLine);
+            if (byRegex.test(originalLine.text)) {
+                // Found the 'by' at original position, now find the current end of this by block
+                const byIndent = originalLine.firstNonWhitespaceCharacterIndex;
+                
+                let byEndLine = searchStartLine;
+                for (let ln = searchStartLine + 1; ln < Math.min(total, searchStartLine + 100); ln++) {
+                    const line = document.lineAt(ln);
+                    const text = line.text.trim();
+                    
+                    // Skip empty lines and comments
+                    if (text === '' || text.startsWith('--')) {
+                        continue;
+                    }
+                    
+                    const indent = line.firstNonWhitespaceCharacterIndex;
+                    if (indent <= byIndent) {
+                        // Found a line at same or less indentation, this is the end
+                        break;
+                    }
+                    
+                    byEndLine = ln;
+                }
+                
+                // Create range from start of by line to end of last line in block
+                const startPos = new vscode.Position(searchStartLine, 0);
+                const endLine = document.lineAt(byEndLine);
+                const endPos = new vscode.Position(byEndLine, endLine.text.length);
+                
+                return new vscode.Range(startPos, endPos);
+            }
+        }
+        
+        return null;
+    }
+
     dispose(): void {
         this.outputChannel.dispose();
+        this.historyManager.dispose();
     }
 }

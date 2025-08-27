@@ -14,6 +14,7 @@ import { CursorMode } from './types/cursorModes';
  */
 export function activate(context: vscode.ExtensionContext) {
     console.log('MathEye Proof Builder is now active!');
+    vscode.window.showInformationMessage('🔥 DEBUG: 扩展已重新加载 - 版本2024-08-26-14:30');
 
     const leanClient = new LeanClientService();
     const codeModifier = new CodeModifierService();
@@ -148,6 +149,22 @@ export function activate(context: vscode.ExtensionContext) {
                     }
                     return;
                 }
+                if (message.action === 'rollback') {
+                    logInfo(`Rollback goal ${message.goalIndex} requested`);
+                    vscode.window.showInformationMessage(`回滚目标${message.goalIndex}请求已收到，正在处理...`);
+                    try {
+                        const success = await codeModifier.rollbackOperation(editorNow.document, message.goalIndex);
+                        if (success) {
+                            logInfo('Rollback completed successfully');
+                            // Refresh goals after rollback
+                            updateProofGoals(editorNow);
+                        }
+                    } catch (error) {
+                        logError(`Rollback failed: ${error}`);
+                        vscode.window.showErrorMessage(`回滚失败: ${error}`);
+                    }
+                    return;
+                }
                 if (!currentGoals || currentGoals.length === 0) {
                     vscode.window.showInformationMessage('当前证明已完成，无需插入。');
                     return;
@@ -176,7 +193,7 @@ export function activate(context: vscode.ExtensionContext) {
             }, () => {
                 // Clear global panel state when disposed
                 currentPanel = undefined;
-            }, currentPanel, translationService, cursorModeManager, cachedAssets);
+            }, currentPanel, translationService, cursorModeManager, cachedAssets, codeModifier);
             
             logDebug(`Panel created/updated. currentPanel exists: ${!!currentPanel}`);
 
@@ -298,7 +315,8 @@ export function activate(context: vscode.ExtensionContext) {
                             translationEnabled: translationService.isTranslationEnabled(),
                             positionLocked,
                             lockedLine: currentPosition?.line ?? null,
-                            cursorModeLabel: cursorModeLabelNow
+                            cursorModeLabel: cursorModeLabelNow,
+                            goalHistoryStatus: currentGoals.map((_, index) => codeModifier.canRollback(index))
                           });
                         } catch {}
                     } catch (error) {
@@ -317,7 +335,8 @@ export function activate(context: vscode.ExtensionContext) {
                     translationEnabled: translationService.isTranslationEnabled(),
                     positionLocked,
                     lockedLine: currentPosition?.line ?? null,
-                    cursorModeLabel: cursorModeLabelNow
+                    cursorModeLabel: cursorModeLabelNow,
+                    goalHistoryStatus: currentGoals.map((_, index) => codeModifier.canRollback(index))
                   });
                 } catch {}
             } catch (e) {
@@ -373,7 +392,8 @@ function createProofGoalsPanel(
     existingPanel?: vscode.WebviewPanel,
     translationService?: TranslationService,
     cursorModeManager?: CursorModeManager,
-    assets?: { katexCssHref: string; markedJsHref: string; domPurifyJsHref: string; katexJsHref: string; autoRenderJsHref: string }
+    assets?: { katexCssHref: string; markedJsHref: string; domPurifyJsHref: string; katexJsHref: string; autoRenderJsHref: string },
+    codeModifier?: any
 ): vscode.WebviewPanel {
     // Reuse existing panel if available
     const panel = existingPanel || vscode.window.createWebviewPanel(
@@ -395,7 +415,8 @@ function createProofGoalsPanel(
         translationService?.isTranslationEnabled(),
         cursorModeManager?.getCurrentMode(),
         assets ?? getLocalAssets(),
-        panel.webview.cspSource
+        panel.webview.cspSource,
+        codeModifier
     );
 
     // Handle messages from webview
@@ -414,7 +435,8 @@ function createProofGoalsPanel(
             goals: s.goals,
             translationEnabled: translationService?.isTranslationEnabled() ?? false,
             positionLocked: s.positionLocked,
-            lockedLine: s.lockedPosition?.line ?? null
+            lockedLine: s.lockedPosition?.line ?? null,
+            goalHistoryStatus: s.goals.map((_, index) => codeModifier?.canRollback?.(index) ?? false)  // 初始状态都没有历史
           });
         } catch {}
     }, null, context.subscriptions);
@@ -437,7 +459,8 @@ function getWebviewContent(
     translationEnabled?: boolean,
     cursorMode?: CursorMode,
     assets?: { katexCssHref: string; markedJsHref: string; domPurifyJsHref: string; katexJsHref: string; autoRenderJsHref: string },
-    cspSource?: string
+    cspSource?: string,
+    codeModifier?: any
 ): string {
     const lockLabel = positionLocked ? '▶ 解除固定' : '⏸ 固定光标';
     const translationLabel = translationEnabled ? '🌐 关闭翻译' : '🌐 开启翻译';
@@ -454,6 +477,8 @@ function getWebviewContent(
     const lockInfo = positionLocked && lockedPos ? `<span class="lock-info">已固定于第 ${lockedPos.line + 1} 行</span>` : '';
     const goalsHtml = goals.map((goal, index) => {
         const hasTranslation = !!translationEnabled;
+        // 初始渲染时不显示回滚按钮，只有后续动态更新时才显示
+        const hasHistory = false;
         return `
             <div class="goal">
                 <div class="goal-header">
@@ -476,6 +501,7 @@ function getWebviewContent(
                 <div class="actions">
                     <button onclick="sendFeedback(${index}, 'admit')" class="btn admit">✓ 正确</button>
                     <button onclick="sendFeedback(${index}, 'deny')" class="btn deny">✗ 错误</button>
+                    ${hasHistory ? `<button onclick="sendFeedback(${index}, 'rollback')" class="btn rollback">↶ 回滚</button>` : ''}
                 </div>
             </div>
         `;
@@ -562,6 +588,7 @@ function getWebviewContent(
                 .btn.lock { background: #6c757d; color: white; margin-left: 10px; }
                 .btn.cursor-mode { background: #17a2b8; color: white; margin-right: 10px; }
                 .btn.translation { background: #007acc; color: white; margin-right: 10px; }
+                .btn.rollback { background: #fd7e14; color: white; margin-right: 10px; }
                 .toolbar { display: flex; align-items: center; justify-content: space-between; }
                 .lock-info { color: var(--vscode-descriptionForeground); margin-left: 10px; }
                 h1 {
@@ -619,6 +646,7 @@ function getWebviewContent(
                     vscode.postMessage({ goalIndex: -1, action: 'toggleTranslation' });
                 }
                 
+                
                 // Test if buttons exist
                 document.addEventListener('DOMContentLoaded', function() {
                     console.log('DOM loaded');
@@ -628,7 +656,7 @@ function getWebviewContent(
                         console.log('Translation button text:', translationBtn.textContent);
                     }
                 });
-                function buildGoalHtml(goal, index, translationEnabled) {
+                function buildGoalHtml(goal, index, translationEnabled, hasHistory) {
                   const hasTranslation = !!translationEnabled;
                   const isError = !!goal.translationError;
                   const rawText = goal.translation ? goal.translation : (isError ? '' : '翻译中...');
@@ -657,6 +685,7 @@ function getWebviewContent(
                     + '<div class="actions">'
                     + '<button class="btn admit" data-idx="' + index + '">✓ 正确</button>'
                     + '<button class="btn deny" data-idx="' + index + '">✗ 错误</button>'
+                    + (hasHistory ? ('<button class="btn rollback" data-idx="' + index + '">↶ 回滚</button>') : '')
                     + '</div>'
                     + '</div>'
                   );
@@ -666,7 +695,7 @@ function getWebviewContent(
                   const root = document.getElementById('goals-root');
                   if (!root) return;
                   const goals = Array.isArray(data.goals) ? data.goals : [];
-                  const html = goals.map((g, i) => buildGoalHtml(g, i, !!data.translationEnabled)).join('');
+                  const html = goals.map((g, i) => buildGoalHtml(g, i, !!data.translationEnabled, !!(data.goalHistoryStatus && data.goalHistoryStatus[i]))).join('');
                   root.innerHTML = html;
                   // update toolbar lock state label/info if provided
                   if (typeof data.positionLocked === 'boolean') {
@@ -696,6 +725,12 @@ function getWebviewContent(
                     btn.addEventListener('click', () => {
                       const idx = parseInt(btn.getAttribute('data-idx') || '0', 10);
                       sendFeedback(idx, 'deny');
+                    });
+                  });
+                  root.querySelectorAll('.btn.rollback').forEach((btn) => {
+                    btn.addEventListener('click', () => {
+                      const idx = parseInt(btn.getAttribute('data-idx') || '0', 10);
+                      sendFeedback(idx, 'rollback');
                     });
                   });
                   renderTranslations();
