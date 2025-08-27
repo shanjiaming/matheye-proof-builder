@@ -14,7 +14,7 @@ import { CursorMode } from './types/cursorModes';
  */
 export function activate(context: vscode.ExtensionContext) {
     console.log('MathEye Proof Builder is now active!');
-    vscode.window.showInformationMessage('🔥 DEBUG: 扩展已重新加载 - 版本2024-08-26-14:30');
+    vscode.window.showInformationMessage('DEBUG: 扩展已重新加载');
 
     const leanClient = new LeanClientService();
     const codeModifier = new CodeModifierService();
@@ -316,7 +316,7 @@ export function activate(context: vscode.ExtensionContext) {
                             positionLocked,
                             lockedLine: currentPosition?.line ?? null,
                             cursorModeLabel: cursorModeLabelNow,
-                            goalHistoryStatus: currentGoals.map((_, index) => codeModifier.canRollback(index))
+                            goalHistoryStatus: currentGoals.map((_, index) => codeModifier.canRollbackSafely(index, textEditor.document))
                           });
                         } catch {}
                     } catch (error) {
@@ -336,7 +336,7 @@ export function activate(context: vscode.ExtensionContext) {
                     positionLocked,
                     lockedLine: currentPosition?.line ?? null,
                     cursorModeLabel: cursorModeLabelNow,
-                    goalHistoryStatus: currentGoals.map((_, index) => codeModifier.canRollback(index))
+                    goalHistoryStatus: currentGoals.map((_, index) => codeModifier.canRollbackSafely(index, textEditor.document))
                   });
                 } catch {}
             } catch (e) {
@@ -436,7 +436,11 @@ function createProofGoalsPanel(
             translationEnabled: translationService?.isTranslationEnabled() ?? false,
             positionLocked: s.positionLocked,
             lockedLine: s.lockedPosition?.line ?? null,
-            goalHistoryStatus: s.goals.map((_, index) => codeModifier?.canRollback?.(index) ?? false)  // 初始状态都没有历史
+            goalHistoryStatus: (() => {
+              const activeEditor = vscode.window.activeTextEditor;
+              if (!activeEditor) return s.goals.map(() => false);
+              return s.goals.map((_, index) => codeModifier?.canRollbackSafely?.(index, activeEditor.document) ?? false);
+            })()
           });
         } catch {}
     }, null, context.subscriptions);

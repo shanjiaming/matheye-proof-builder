@@ -179,7 +179,8 @@ export class CodeModifierService {
             const edit = new vscode.WorkspaceEdit();
             // Insert human_oracle macro at top if missing
             const fullText = document.getText();
-            if (!fullText.includes('macro "human_oracle"')) {
+            const macroRegex = /^\s*macro\s+"human_oracle"\s*:/m;
+            if (!macroRegex.test(fullText)) {
                 let insertLine = 0;
                 const total = document.lineCount;
                 for (let ln = 0; ln < total; ln++) {
@@ -441,6 +442,13 @@ export class CodeModifierService {
     }
 
     /**
+     * Check if rollback is available and likely valid for a specific goal
+     */
+    canRollbackSafely(goalIndex: number, document: vscode.TextDocument): boolean {
+        return this.historyManager.canRollbackSafely(goalIndex, document);
+    }
+
+    /**
      * Generate code text to insert based on user action
      */
     private generateInsertText(goal: ProofGoal, action: 'admit' | 'deny', variableName: string): string {
@@ -611,7 +619,6 @@ export class CodeModifierService {
             }
         }
         const base = 'h_annotated_';
-        if (!taken.has(base)) return base + '1';
         let idx = 1;
         while (taken.has(base + idx)) idx++;
         return base + idx;

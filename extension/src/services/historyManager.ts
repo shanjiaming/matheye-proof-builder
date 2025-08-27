@@ -46,6 +46,38 @@ export class HistoryManager {
     }
 
     /**
+     * Check if there's a rollback operation available and if it's likely still valid (synchronous check)
+     */
+    canRollbackSafely(goalIndex: number, document: vscode.TextDocument): boolean {
+        const operations = this.operationsByGoal.get(goalIndex);
+        if (!operations || operations.length === 0) {
+            return false;
+        }
+
+        const operation = operations[operations.length - 1]; // Get the latest operation
+
+        // Basic synchronous checks
+        try {
+            // Check if document URI matches
+            if (document.uri.toString() !== operation.documentUri) {
+                return false;
+            }
+
+            // Check if the by block range is still within document bounds
+            const currentRange = operation.byBlockRange;
+            if (currentRange.start.line >= document.lineCount || currentRange.end.line >= document.lineCount) {
+                return false;
+            }
+
+            // This is a basic check - the full validation happens in validateOperation
+            return true;
+            
+        } catch (error) {
+            return false;
+        }
+    }
+
+    /**
      * Get the operation for a specific goal
      */
     getOperation(goalIndex: number): HistoryOperation | null {
