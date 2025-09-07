@@ -227,8 +227,10 @@ def getStructuredContext (params : InputParams) : RequestM (RequestTask Structur
     | none =>
       return {}
 
--- AST structure based on jixia's approach
-/-
+/-!
+  Dev-only AST DTO helpers (not used in production RPC).
+  保留给外部 round-trip 工具使用；生产路径不调用。
+-/
 -- DEV-ONLY DTOs and helpers re-enabled for round-trip tooling (non-RPC)
 structure SyntaxNodeDto where
   kind : String
@@ -1211,7 +1213,7 @@ def getByBlockRange (params : ByBlockRangeParams) : RequestM (RequestTask ByBloc
       }
 
 /-- Convert AST data to formatted text using Lean native formatter -/
-/- DEPRECATED/DEV-ONLY: 不导出为 RPC -/
+/- DEPRECATED/DEV-ONLY: 不导出为 RPC；保留文档与外部工具使用 -/
 def convertASTToText (params : ASTDataParams) : RequestM (RequestTask TextConversionResult) := do
   RequestM.asTask do
     -- Real implementation: Parse JSON → DTO → Syntax → Format
@@ -1235,7 +1237,7 @@ structure FileRoundTripTestResult where
   errorMsg : Option String := none
   deriving FromJson, ToJson
 
-/- DEPRECATED/DEV-ONLY: 不导出为 RPC -/
+/- DEPRECATED/DEV-ONLY: 不导出为 RPC；保留文档与外部工具使用 -/
 def testFileRoundTripConversion (params : FileRoundTripTestParams) : RequestM (RequestTask FileRoundTripTestResult) := do
   RequestM.asTask do
     -- Real round-trip conversion is implemented in final_roundtrip_tool.py
