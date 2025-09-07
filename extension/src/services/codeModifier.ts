@@ -123,10 +123,8 @@ export class CodeModifierService {
             let insertPos = logicalCursor.position;
             try { insertPos = await this.leanClient.getInsertionPoint(insertPos, document); } catch {}
             // 统一为整文件替换：请求服务器直接返回整篇文本，避免局部替换导致快照漂移
-            let resp = await this.leanClient.insertHaveByAction(insertPos, document, action, byRange, includeByOnSeq, true);
-            if (!resp.success) {
-                throw new Error(resp.errorMsg || 'Lean RPC insert failed');
-            }
+            const resp = await this.leanClient.insertHaveByAction(insertPos, document, action, byRange, includeByOnSeq, true);
+            if (!resp.success) throw new Error(resp.errorMsg || 'Lean RPC insert failed');
             // Capture replaced文本（用于历史记录）：若返回整文件范围，则用全文；否则用局部片段
             const wholeRangeReturned = resp.range
               && resp.range.start.line === 0 && resp.range.start.character === 0
@@ -265,11 +263,7 @@ export class CodeModifierService {
             // Use Lean RPC (Meta-based) to insert have by action; server reads goal Expr, delabs, parses, trims, appends
             await this.ensureImportsAndMacros(document);
             // 显式请求整篇返回，禁止任何客户端端的字符串拼接
-            let resp = await this.leanClient.insertHaveByAction(position, document, action, undefined, undefined, true);
-            if (!resp.success && /No RPC method \'MathEye\\.insertHaveByAction\'/m.test(String(resp.errorMsg || ''))) {
-                // Retry once after ensuring imports/macros
-                resp = await this.leanClient.insertHaveByAction(position, document, action);
-            }
+            const resp = await this.leanClient.insertHaveByAction(position, document, action, undefined, undefined, true);
             if (!resp.success || !resp.newText || !resp.range) {
                 throw new Error(resp.errorMsg || 'Lean RPC insert failed');
             }

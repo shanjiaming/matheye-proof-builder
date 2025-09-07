@@ -193,19 +193,7 @@ export function activate(context: vscode.ExtensionContext) {
             fs.appendFileSync(logPath, `admit@ ${pos.line}:${pos.character} byRange=${brs} includeBy=${includeByOnSeq} -> success=${res.success} range=${res.range ? `[${res.range.start.line}:${res.range.start.character}-${res.range.end.line}:${res.range.end.character}]` : 'none'} newText.len=${res.newText?.length ?? 0}\n`);
           }
         } catch {}
-        for (let i = 0; i < 12 && (!res.success || !res.newText || !res.range); i++) {
-            await new Promise(r => setTimeout(r, 150));
-            // 期间再次锚定一次（容器稳定后 tail 可能变化）
-            try { pos = await leanClient.getInsertionPoint(pos, editor.document); } catch {}
-            res = await leanClient.insertHaveByAction(pos, editor.document, 'admit', byRange, includeByOnSeq, true);
-            try {
-              if (process.env.MATHEYE_TEST_MODE === '1') {
-                const p = require('path'); const fs = require('fs');
-                const logPath = p.resolve(__dirname, 'insert_debug.log');
-                fs.appendFileSync(logPath, `retry admit -> success=${res.success}\n`);
-              }
-            } catch {}
-        }
+        // 不重试：失败即失败，避免不透明 fallback
         if (!res.success || !res.newText || !res.range) return;
 
         // 仅允许整篇替换：要求服务器返回整文件范围
@@ -305,18 +293,7 @@ export function activate(context: vscode.ExtensionContext) {
             fs.appendFileSync(logPath, `deny@ ${pos.line}:${pos.character} byRange=${brs} includeBy=${includeByOnSeq} -> success=${res.success} range=${res.range ? `[${res.range.start.line}:${res.range.start.character}-${res.range.end.line}:${res.range.end.character}]` : 'none'} newText.len=${res.newText?.length ?? 0}\n`);
           }
         } catch {}
-        for (let i = 0; i < 12 && (!res.success || !res.newText || !res.range); i++) {
-            await new Promise(r => setTimeout(r, 150));
-            try { pos = await leanClient.getInsertionPoint(pos, editor.document); } catch {}
-            res = await leanClient.insertHaveByAction(pos, editor.document, 'deny', byRange, includeByOnSeq, true);
-            try {
-              if (process.env.MATHEYE_TEST_MODE === '1') {
-                const p = require('path'); const fs = require('fs');
-                const logPath = p.resolve(__dirname, 'insert_debug.log');
-                fs.appendFileSync(logPath, `retry deny -> success=${res.success}\n`);
-              }
-            } catch {}
-        }
+        // 不重试：失败即失败
         if (!res.success || !res.newText || !res.range) return;
 
         // 仅允许整篇替换：要求服务器返回整文件范围

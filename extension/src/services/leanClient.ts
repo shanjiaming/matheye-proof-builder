@@ -171,19 +171,19 @@ export class LeanClientService {
                     stop: { line: byRange.end.line, character: byRange.end.character }
                 };
                 (params as any)["blockRange?"] = rangeDto;
-                (params as any)["blockRange"] = rangeDto;
             }
             if (includeByOnSeq !== undefined) {
                 (params as any)["includeByOnSeq?"] = includeByOnSeq;
-                (params as any)["includeByOnSeq"] = includeByOnSeq;
             }
             if (returnWholeFile !== undefined) {
                 (params as any)["returnWholeFile?"] = returnWholeFile;
-                (params as any)["returnWholeFile"] = returnWholeFile;
             }
             const rpcParams = {
                 sessionId,
                 method: "MathEye.insertHaveByAction",
+                // Lean RPC requires textDocument + position for context resolution
+                textDocument: { uri },
+                position: { line: position.line, character: position.character },
                 params
             };
             const result: any = await client.sendRequest("$/lean/rpc/call", rpcParams);
@@ -209,17 +209,8 @@ export class LeanClientService {
         };
         
         try {
-            let res = await call();
-            if (!res.success && /closed file/i.test(String(res.errorMsg || ''))) {
-                await this.ensureDocumentVisible(document);
-                res = await call();
-            }
-            return res;
+            return await call();
         } catch (e: any) {
-            if (/closed file/i.test(String(e))) {
-                await this.ensureDocumentVisible(document);
-                try { return await call(); } catch {}
-            }
             return { success: false, errorMsg: String(e) };
         }
     }
@@ -239,6 +230,8 @@ export class LeanClientService {
             const rpcParams = {
                 sessionId,
                 method: "MathEye.getByBlockRange", 
+                textDocument: { uri },
+                position: { line: position.line, character: position.character },
                 params: {
                     pos: { line: position.line, character: position.character }
                 }
@@ -289,6 +282,8 @@ export class LeanClientService {
             const rpcParams = {
                 sessionId,
                 method: "MathEye.captureAnchor",
+                textDocument: { uri },
+                position: { line: position.line, character: position.character },
                 params: {
                     pos: { line: position.line, character: position.character }
                 }
@@ -315,6 +310,8 @@ export class LeanClientService {
             const rpcParams = {
                 sessionId,
                 method: "MathEye.restoreByAnchor",
+                textDocument: { uri },
+                position: anchor && anchor.anchorPos ? { line: anchor.anchorPos.line, character: anchor.anchorPos.character } : { line: 0, character: 0 },
                 params: anchor
             };
             const result: any = await client.sendRequest("$/lean/rpc/call", rpcParams);
