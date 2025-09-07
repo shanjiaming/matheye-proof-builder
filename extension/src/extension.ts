@@ -16,11 +16,57 @@ export function activate(context: vscode.ExtensionContext) {
     console.log('MathEye Proof Builder is now active!');
     vscode.window.showInformationMessage('DEBUG: 扩展已重新加载');
 
-    const leanClient = new LeanClientService();
-    const codeModifier = new CodeModifierService();
-    const translationService = new TranslationService();
-    const cursorModeManager = new CursorModeManager(context);
     const outputChannel = vscode.window.createOutputChannel("MathEye");
+
+    // Preflight: ensure Lean side is built before user interaction in Dev Host
+    (async () => {
+        try {
+            const cp = require('child_process') as typeof import('child_process');
+            const fs = require('fs') as typeof import('fs');
+            // Robustly resolve repo root: prefer extension/../ (two levels up from out/)
+            const candidates = [
+                path.resolve(__dirname, '..', '..'),            // <repo>
+                path.resolve(__dirname, '..', '..', '..'),      // <repo>/..
+                path.resolve(__dirname, '.'),                    // extension/out
+            ];
+            let repoRootGuess = candidates.find(p => fs.existsSync(path.join(p, 'MathEye.lean')));
+            if (!repoRootGuess) repoRootGuess = path.resolve(__dirname, '..', '..');
+            outputChannel.appendLine(`[Preflight] repoRoot=${repoRootGuess}`);
+            // Run `lake build MathEye` at repo root; tolerate environments without lake
+            outputChannel.appendLine('[Preflight] lake build MathEye...');
+            await new Promise<void>((resolve) => {
+                const p = cp.spawn('lake', ['build', 'MathEye'], { cwd: repoRootGuess, shell: true });
+                p.stdout?.on('data', (d: any) => outputChannel.appendLine(String(d)));
+                p.stderr?.on('data', (d: any) => outputChannel.appendLine(String(d)));
+                p.on('exit', () => resolve());
+                p.on('error', () => resolve());
+            });
+            // Try to restart Lean server if extension is present
+            try { await vscode.commands.executeCommand('lean4.restartServer'); } catch {}
+
+            // Developer convenience: auto-open a default test file under test_cases so你不必手动点开
+            try {
+                const testFile = path.join(repoRootGuess, 'test_cases', 'test_01_basic_theorem.lean');
+                if (fs.existsSync(testFile)) {
+                    const doc = await vscode.workspace.openTextDocument(testFile);
+                    await vscode.window.showTextDocument(doc, { preview: false });
+                }
+            } catch {}
+        } catch (e) {
+            outputChannel.appendLine(`[Preflight] skipped or failed: ${e}`);
+        }
+    })();
+
+    const isTest = process.env.MATHEYE_TEST_MODE === '1';
+    const forceReal = process.env.MATHEYE_USE_REAL_RPC === '1';
+    const useMock = isTest && !forceReal;
+    const leanClient: LeanClientService = useMock
+      ? new (require('./test/mockLeanClient').MockLeanClientService)()
+      : new LeanClientService(outputChannel);
+    const translationService = new TranslationService(outputChannel);
+    const codeModifier = new CodeModifierService(outputChannel, leanClient);
+    const cursorModeManager = new CursorModeManager(context, leanClient);
+    
     const config = () => vscode.workspace.getConfiguration();
     const logLevel = () => (config().get<string>('matheye.logLevel', 'error')) as 'off'|'error'|'info'|'debug';
     const debounceMs = () => config().get<number>('matheye.updateDebounceMs', 250);
@@ -38,6 +84,270 @@ export function activate(context: vscode.ExtensionContext) {
     let currentPosition: vscode.Position | undefined = undefined;
     let positionLocked: boolean = false;
 
+    // Register command: Insert have snippet via Lean RPC (AST-based)
+    const insertHaveCmd = vscode.commands.registerCommand('matheye.insertHaveSnippet', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) return;
+        if (!isTest && editor.document.languageId !== 'lean4') {
+            vscode.window.showWarningMessage('This command works with Lean 4 files only');
+            return;
+        }
+        vscode.window.showInformationMessage('Insert Have Snippet (free-form) 已禁用：请使用“Insert Have (Admit/Deny)”以保持 AST-only 精确编辑。');
+    });
+
+    // Quick actions: Insert have by action (admit/deny) via server AST path
+    const insertHaveAdmit = vscode.commands.registerCommand('matheye.insertHaveAdmit', async () => {
+        const editor = vscode.window.activeTextEditor; if (!editor) return;
+        if (!isTest && editor.document.languageId !== 'lean4') return;
+        try { require('fs').appendFileSync(require('path').resolve(__dirname, './ext_calls.log'), `insertHaveAdmit ${editor.document.uri} @ ${editor.selection.active.line}:${editor.selection.active.character}\n`); } catch {}
+        // In real RPC mode, give Lean server a brief moment to be ready
+        if (process.env.MATHEYE_USE_REAL_RPC === '1') {
+            // 放宽等待窗口，避免VS Code测试宿主安装/激活lean4扩展的竞态
+            for (let i = 0; i < 60; i++) {
+                if (await leanClient.isLeanServerReady()) break;
+                await new Promise(r => setTimeout(r, 200));
+            }
+        }
+        // Ensure imports/macros first, then re-anchor
+        await codeModifier.ensureImportsAndMacros(editor.document);
+        // Try to anchor inside the exact by-block to avoid seam positions around '|' and '=>'
+        let pos = editor.selection.active;
+        let byRange: vscode.Range | undefined = undefined;
+        let includeByOnSeq = false;
+        try {
+            // 重试等待 by/战术容器可用，避免刚载入时 infoTree 尚未就绪
+            let br = await leanClient.getByBlockRange(pos, editor.document);
+            for (let i = 0; i < 20 && (!br.success || !br.range); i++) {
+                await new Promise(r => setTimeout(r, 150));
+                br = await leanClient.getByBlockRange(pos, editor.document);
+            }
+            try {
+                if (process.env.MATHEYE_TEST_MODE === '1') {
+                    const p = require('path'); const fs = require('fs');
+                    const logPath = p.resolve(__dirname, 'insert_debug.log');
+                    fs.appendFileSync(logPath, `getByBlockRange success=${br.success} range=${br.range ? `[${br.range.start.line}:${br.range.start.character}-${br.range.end.line}:${br.range.end.character}]` : 'none'} isTactic=${br.isTacticContext} isTerm=${br.isTermContext} syntax=${(br as any).syntaxKind}\n`);
+                }
+            } catch {}
+            if (br.success && br.range) {
+                const kindStr = (br as any).syntaxKind || '';
+                // Use precise context detection: only wrap with `by` in term context
+                if (kindStr && !String(kindStr).startsWith('Lean.Parser.Tactic.')) {
+                    // 容器是 term（如 byTactic）— 需要补 `by`
+                    byRange = br.range;
+                    includeByOnSeq = true;
+                } else if (br.isTacticContext) {
+                    // Already in tactic context - insert tactics directly (never include `by`)
+                    if (br.isMatchAlt) {
+                        // Inside match alternative - position after '=>'
+                        const line = br.range.start.line;
+                        const txt = editor.document.lineAt(line).text;
+                        const arrow = txt.indexOf('=>');
+                        if (arrow >= 0) {
+                            const hasSpace = txt.slice(arrow + 2).startsWith(' ');
+                            pos = new vscode.Position(line, arrow + 2 + (hasSpace ? 1 : 0));
+                            const br2 = await leanClient.getByBlockRange(pos, editor.document);
+                            byRange = br2.success ? br2.range : br.range;
+                            includeByOnSeq = false; // tactic context
+                        } else {
+                            byRange = br.range;
+                            includeByOnSeq = false; // tactic context
+                        }
+                    } else {
+                        // Regular tactic context (inside by-block)
+                        byRange = br.range;
+                        includeByOnSeq = false; // tactic context
+                    }
+                } else {
+                    // In term context - need to wrap with 'by'
+                    byRange = br.range;
+                    includeByOnSeq = true;
+                }
+            }
+        } catch {}
+        // Snap to canonical insertion point以避免缝隙；然后再次拉取 by 块范围（更稳定）
+        try { pos = await leanClient.getInsertionPoint(pos, editor.document); } catch {}
+        try {
+            let br2 = await leanClient.getByBlockRange(pos, editor.document);
+            for (let i = 0; i < 10 && (!br2.success || !br2.range); i++) {
+                await new Promise(r => setTimeout(r, 120));
+                br2 = await leanClient.getByBlockRange(pos, editor.document);
+            }
+            if (br2.success && br2.range) {
+                const kindStr2 = (br2 as any).syntaxKind || '';
+                if (kindStr2 && !String(kindStr2).startsWith('Lean.Parser.Tactic.')) {
+                    byRange = br2.range;
+                    includeByOnSeq = true;
+                } else {
+                    byRange = br2.range;
+                    includeByOnSeq = false;
+                }
+            }
+        } catch {}
+        // 调用 RPC（短轮询直到成功或超时），避免刚载入时类型/路径未就绪
+        let res = await leanClient.insertHaveByAction(pos, editor.document, 'admit', byRange, includeByOnSeq, true);
+        try {
+          if (process.env.MATHEYE_TEST_MODE === '1') {
+            const p = require('path'); const fs = require('fs');
+            const logPath = p.resolve(__dirname, 'insert_debug.log');
+            const brs = byRange ? `[${byRange.start.line}:${byRange.start.character}-${byRange.end.line}:${byRange.end.character}]` : 'none';
+            fs.appendFileSync(logPath, `admit@ ${pos.line}:${pos.character} byRange=${brs} includeBy=${includeByOnSeq} -> success=${res.success} range=${res.range ? `[${res.range.start.line}:${res.range.start.character}-${res.range.end.line}:${res.range.end.character}]` : 'none'} newText.len=${res.newText?.length ?? 0}\n`);
+          }
+        } catch {}
+        for (let i = 0; i < 12 && (!res.success || !res.newText || !res.range); i++) {
+            await new Promise(r => setTimeout(r, 150));
+            // 期间再次锚定一次（容器稳定后 tail 可能变化）
+            try { pos = await leanClient.getInsertionPoint(pos, editor.document); } catch {}
+            res = await leanClient.insertHaveByAction(pos, editor.document, 'admit', byRange, includeByOnSeq, true);
+            try {
+              if (process.env.MATHEYE_TEST_MODE === '1') {
+                const p = require('path'); const fs = require('fs');
+                const logPath = p.resolve(__dirname, 'insert_debug.log');
+                fs.appendFileSync(logPath, `retry admit -> success=${res.success}\n`);
+              }
+            } catch {}
+        }
+        if (!res.success || !res.newText || !res.range) return;
+
+        // 仅允许整篇替换：要求服务器返回整文件范围
+        const wholeRangeReturned = res.range.start.line === 0 && res.range.start.character === 0 && res.range.end.line >= editor.document.lineCount - 1;
+        if (!wholeRangeReturned) {
+            throw new Error('服务器未返回整篇替换范围');
+        }
+        const we = new vscode.WorkspaceEdit();
+        const fullRange = new vscode.Range(0, 0, editor.document.lineCount, 0);
+        we.replace(editor.document.uri, fullRange, res.newText);
+        await vscode.workspace.applyEdit(we);
+    });
+    const insertHaveDeny = vscode.commands.registerCommand('matheye.insertHaveDeny', async () => {
+        const editor = vscode.window.activeTextEditor; if (!editor) return;
+        if (!isTest && editor.document.languageId !== 'lean4') return;
+        // In real RPC mode, give Lean server a brief moment to be ready
+        if (process.env.MATHEYE_USE_REAL_RPC === '1') {
+            // 放宽等待窗口，避免VS Code测试宿主安装/激活lean4扩展的竞态
+            for (let i = 0; i < 60; i++) {
+                if (await leanClient.isLeanServerReady()) break;
+                await new Promise(r => setTimeout(r, 200));
+            }
+        }
+        // Ensure imports/macros first, then re-anchor
+        await codeModifier.ensureImportsAndMacros(editor.document);
+        let pos = editor.selection.active;
+        let byRange: vscode.Range | undefined = undefined;
+        let includeByOnSeq = false;
+        try {
+            // 重试等待 by/战术容器可用，避免刚载入时 infoTree 尚未就绪
+            let br = await leanClient.getByBlockRange(pos, editor.document);
+            for (let i = 0; i < 20 && (!br.success || !br.range); i++) {
+                await new Promise(r => setTimeout(r, 150));
+                br = await leanClient.getByBlockRange(pos, editor.document);
+            }
+            if (br.success && br.range) {
+                const kindStr = (br as any).syntaxKind || '';
+                // Use precise context detection: only wrap with `by` in term context
+                if (kindStr && !String(kindStr).startsWith('Lean.Parser.Tactic.')) {
+                    byRange = br.range;
+                    includeByOnSeq = true;
+                } else if (br.isTacticContext) {
+                    // Already in tactic context - insert tactics directly (never include `by`)
+                    if (br.isMatchAlt) {
+                        // Inside match alternative - position after '=>'
+                        const line = br.range.start.line;
+                        const txt = editor.document.lineAt(line).text;
+                        const arrow = txt.indexOf('=>');
+                        if (arrow >= 0) {
+                            const hasSpace = txt.slice(arrow + 2).startsWith(' ');
+                            pos = new vscode.Position(line, arrow + 2 + (hasSpace ? 1 : 0));
+                            const br2 = await leanClient.getByBlockRange(pos, editor.document);
+                            byRange = br2.success ? br2.range : br.range;
+                            includeByOnSeq = false; // tactic context
+                        } else {
+                            byRange = br.range;
+                            includeByOnSeq = false; // tactic context
+                        }
+                    } else {
+                        // Regular tactic context (inside by-block)
+                        byRange = br.range;
+                        includeByOnSeq = false; // tactic context
+                    }
+                } else {
+                    // In term context - need to wrap with 'by'
+                    byRange = br.range;
+                    includeByOnSeq = true;
+                }
+            }
+        } catch {}
+        // 容器就绪后再锚定一次，并再次获取 by 块范围
+        try { pos = await leanClient.getInsertionPoint(pos, editor.document); } catch {}
+        try {
+            let br2 = await leanClient.getByBlockRange(pos, editor.document);
+            for (let i = 0; i < 10 && (!br2.success || !br2.range); i++) {
+                await new Promise(r => setTimeout(r, 120));
+                br2 = await leanClient.getByBlockRange(pos, editor.document);
+            }
+            if (br2.success && br2.range) {
+                const kindStr2 = (br2 as any).syntaxKind || '';
+                if (kindStr2 && !String(kindStr2).startsWith('Lean.Parser.Tactic.')) {
+                    byRange = br2.range;
+                    includeByOnSeq = true;
+                } else {
+                    byRange = br2.range;
+                    includeByOnSeq = false;
+                }
+            }
+        } catch {}
+        // 调用 RPC（短轮询直到成功或超时）
+        let res = await leanClient.insertHaveByAction(pos, editor.document, 'deny', byRange, includeByOnSeq, true);
+        try {
+          if (process.env.MATHEYE_TEST_MODE === '1') {
+            const p = require('path'); const fs = require('fs');
+            const logPath = p.resolve(__dirname, 'insert_debug.log');
+            const brs = byRange ? `[${byRange.start.line}:${byRange.start.character}-${byRange.end.line}:${byRange.end.character}]` : 'none';
+            fs.appendFileSync(logPath, `deny@ ${pos.line}:${pos.character} byRange=${brs} includeBy=${includeByOnSeq} -> success=${res.success} range=${res.range ? `[${res.range.start.line}:${res.range.start.character}-${res.range.end.line}:${res.range.end.character}]` : 'none'} newText.len=${res.newText?.length ?? 0}\n`);
+          }
+        } catch {}
+        for (let i = 0; i < 12 && (!res.success || !res.newText || !res.range); i++) {
+            await new Promise(r => setTimeout(r, 150));
+            try { pos = await leanClient.getInsertionPoint(pos, editor.document); } catch {}
+            res = await leanClient.insertHaveByAction(pos, editor.document, 'deny', byRange, includeByOnSeq, true);
+            try {
+              if (process.env.MATHEYE_TEST_MODE === '1') {
+                const p = require('path'); const fs = require('fs');
+                const logPath = p.resolve(__dirname, 'insert_debug.log');
+                fs.appendFileSync(logPath, `retry deny -> success=${res.success}\n`);
+              }
+            } catch {}
+        }
+        if (!res.success || !res.newText || !res.range) return;
+
+        // 仅允许整篇替换：要求服务器返回整文件范围
+        const wholeRangeReturned = res.range.start.line === 0 && res.range.start.character === 0 && res.range.end.line >= editor.document.lineCount - 1;
+        if (!wholeRangeReturned) {
+            throw new Error('服务器未返回整篇替换范围');
+        }
+        const we = new vscode.WorkspaceEdit();
+        const fullRange = new vscode.Range(0, 0, editor.document.lineCount, 0);
+        we.replace(editor.document.uri, fullRange, res.newText);
+        await vscode.workspace.applyEdit(we);
+    });
+
+    // Testing/utility: apply admit through CodeModifierService to record history
+    const insertHaveAdmitWithHistory = vscode.commands.registerCommand('matheye.insertHaveAdmitWithHistory', async () => {
+        const editor = vscode.window.activeTextEditor; if (!editor) return;
+        if (!isTest && editor.document.languageId !== 'lean4') return;
+        await codeModifier.ensureImportsAndMacros(editor.document);
+        const posNow = editor.selection.active;
+        const logical = await cursorModeManager.calculateLogicalCursor(posNow, editor.document);
+        const delRange = await cursorModeManager.calculateDeleteRange(posNow, editor.document);
+        const goalsResp = await leanClient.getProofGoals(posNow, editor.document);
+        await codeModifier.applyFeedbackWithLogicalCursor(editor.document, goalsResp.goals as any, { goalIndex: 0, action: 'admit' }, logical, delRange);
+    });
+
+    // Testing/utility: rollback last operation in current document
+    const rollbackCurrentBlock = vscode.commands.registerCommand('matheye.rollbackCurrentBlock', async () => {
+        const editor = vscode.window.activeTextEditor; if (!editor) return;
+        await codeModifier.rollbackOperation(editor.document);
+    });
+
     // Register command: Start Proof Builder
     let startProofBuilderCommand = vscode.commands.registerCommand('matheye.startProofBuilder', async () => {
         const editor = vscode.window.activeTextEditor;
@@ -46,7 +356,7 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
 
-        if (editor.document.languageId !== 'lean4') {
+        if (!isTest && editor.document.languageId !== 'lean4') {
             vscode.window.showWarningMessage('MathEye works with Lean 4 files only');
             return;
         }
@@ -93,7 +403,7 @@ export function activate(context: vscode.ExtensionContext) {
                         // Immediately lock to current selection to avoid a 0-goal blink
                         currentPosition = posNow;
                         if (currentPanel) {
-                            try { currentPanel.webview.postMessage({ type: 'lockState', locked: true, line: currentPosition.line }); } catch {}
+                            try { currentPanel.webview.postMessage({ type: 'lockState', locked: true, line: currentPosition.line }); } catch (e) {}
                         }
                         updateProofGoals(editorNow);
                         // Then normalize asynchronously to the tactic's insertion point and refresh once more
@@ -107,7 +417,7 @@ export function activate(context: vscode.ExtensionContext) {
                         if (currentPanel) {
                             try {
                                 currentPanel.webview.postMessage({ type: 'lockState', locked: false, line: null });
-                            } catch {}
+                            } catch (e) {}
                         }
                         updateProofGoals(editorNow);
                     }
@@ -120,7 +430,8 @@ export function activate(context: vscode.ExtensionContext) {
                     vscode.window.showInformationMessage(
                         `光标模式切换为: ${config.label} - ${config.description}`
                     );
-                    // 刷新目标显示
+                    // 立刻强制刷新一次（避免等待焦点/选择变动）
+                    lastUpdateKey = null as any;
                     await updateProofGoals(editorNow);
                     return;
                 }
@@ -150,13 +461,12 @@ export function activate(context: vscode.ExtensionContext) {
                     return;
                 }
                 if (message.action === 'rollback') {
-                    logInfo(`Rollback goal ${message.goalIndex} requested`);
-                    vscode.window.showInformationMessage(`回滚目标${message.goalIndex}请求已收到，正在处理...`);
+                    logInfo(`Rollback current by-block requested`);
                     try {
-                        const success = await codeModifier.rollbackOperation(editorNow.document, message.goalIndex);
+                        vscode.window.showInformationMessage(`回滚当前 by 块请求已收到，正在处理...`);
+                        const success = await codeModifier.rollbackOperation(editorNow.document);
                         if (success) {
                             logInfo('Rollback completed successfully');
-                            // Refresh goals after rollback
                             updateProofGoals(editorNow);
                         }
                     } catch (error) {
@@ -170,9 +480,9 @@ export function activate(context: vscode.ExtensionContext) {
                     return;
                 }
                 const goalsNow = currentGoals;
-                // 使用“逻辑光标”对齐 by 块规则，避免实际插入点造成的不一致
-                const logicalResult = cursorModeManager.calculateLogicalCursor(posNow, editorNow.document);
-                const deleteRange = cursorModeManager.calculateDeleteRange(posNow, editorNow.document);
+                // 使用"逻辑光标"对齐 by 块规则，避免实际插入点造成的不一致
+                const logicalResult = await cursorModeManager.calculateLogicalCursor(posNow, editorNow.document);
+                const deleteRange = await cursorModeManager.calculateDeleteRange(posNow, editorNow.document);
                 
                 const rawAction = (message.action || '').trim();
                 const act = rawAction === 'admit' ? 'admit' : 'deny';
@@ -192,6 +502,14 @@ export function activate(context: vscode.ExtensionContext) {
                 );
                 
                 // 代码插入完成后，立即更新goals显示
+                // Proactively update canRollback based on actual selection to avoid UI lag
+                try {
+                    const selPos = (vscode.window.activeTextEditor ?? editorNow).selection.active;
+                    const can = await codeModifier.canRollbackInCurrentBlock(editorNow.document, selPos);
+                    if (currentPanel) {
+                        try { currentPanel.webview.postMessage({ type: 'canRollbackState', canRollback: can }); } catch (e) {}
+                    }
+                } catch (e) {}
                 setTimeout(() => updateProofGoals(editorNow), 100);
             }, () => {
                 // Clear global panel state when disposed
@@ -247,37 +565,44 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
+    // (Removed) AST round-trip debug command
+    const astTestCommand = vscode.commands.registerCommand('matheye.testASTRoundTrip', async () => {
+        vscode.window.showInformationMessage('AST test command removed in AST-only workflow.');
+    });
+
     // Paperproof-style cursor monitoring with cancellation token
     let cancellationToken: vscode.CancellationTokenSource | null = null;
 
+    let isUpdating = false;
+    let lastUpdateKey: string | null = null;
+    let lastTranslatedGoalsKey: string | null = null;
     const updateProofGoals = async (textEditor: vscode.TextEditor | undefined) => {
-        // Enhanced debugging to understand what's happening
-        logDebug(`updateProofGoals called`);
-        logDebug(`currentPanel exists: ${!!currentPanel}`);
-        logDebug(`textEditor exists: ${!!textEditor}`);
-        logDebug(`textEditor language: ${textEditor?.document?.languageId || 'none'}`);
-
-        // Only update if we have an active panel (like Paperproof)
-        if (!currentPanel || !textEditor) {
-            logDebug("No panel or editor, skipping update");
-            return;
-        }
+        // Only update if we have both a panel and an editor
+        if (!currentPanel || !textEditor) return;
+        if (isUpdating) return;
 
         if (textEditor.document.languageId !== 'lean4') {
-            logDebug("Not Lean4 file, skipping update");
+            // logDebug("Not Lean4 file, skipping update");
             return;
         }
+
+        // Include cursor mode in key so UI updates when mode changes even if cursor/selection doesn't
+        const modeKey = cursorModeManager.getCurrentMode();
+        const key = `${textEditor.document.uri.toString()}@${textEditor.document.version}:${textEditor.selection.active.line}:${textEditor.selection.active.character}:mode=${modeKey}`;
+        if (key === lastUpdateKey) return;
+        lastUpdateKey = key;
 
         // Cancel previous request if still running
         if (cancellationToken) {
             cancellationToken.cancel();
         }
         cancellationToken = new vscode.CancellationTokenSource();
+        isUpdating = true;
 
         try {
             // 计算逻辑光标位置
             const actualPosition = positionLocked && currentPosition ? currentPosition : textEditor.selection.active;
-            const logicalResult = cursorModeManager.calculateLogicalCursor(actualPosition, textEditor.document);
+            const logicalResult = await cursorModeManager.calculateLogicalCursor(actualPosition, textEditor.document);
             const position = logicalResult.position;
             const cursorModeLabelNow = cursorModeManager.getModeConfig(logicalResult.mode).label;
             logDebug(`Updating goals at line ${position.line}, char ${position.character}`);
@@ -296,10 +621,11 @@ export function activate(context: vscode.ExtensionContext) {
             // Show goals immediately; kick off translations asynchronously so UI is never blocked
             currentGoals = response.goals.map(g => ({ ...g }));
             if (translationService.isTranslationEnabled()) {
-                logDebug('Translation enabled, start async translations...');
-                const versionAtStart = Date.now();
-                const goalsSnapshot = currentGoals.map(g => g.type);
-                Promise.all(goalsSnapshot.map(async (goalText, idx) => {
+                const goalsSnapshot = currentGoals.map(g => g.type).join('\n---\n');
+                if (goalsSnapshot !== lastTranslatedGoalsKey) {
+                    lastTranslatedGoalsKey = goalsSnapshot;
+                    const arr = currentGoals.map(g => g.type);
+                    Promise.all(arr.map(async (goalText, idx) => {
                     try {
                         const result = await translationService.translateGoal(goalText);
                         // Only apply if panel still exists and goal matches snapshot at same index
@@ -319,29 +645,34 @@ export function activate(context: vscode.ExtensionContext) {
                             positionLocked,
                             lockedLine: currentPosition?.line ?? null,
                             cursorModeLabel: cursorModeLabelNow,
-                            goalHistoryStatus: currentGoals.map((_, index) => codeModifier.canRollbackSafely(index, textEditor.document))
+                            // Use actual selection for canRollback, not logical cursor
+                            canRollback: await codeModifier.canRollbackInCurrentBlock(textEditor.document, (vscode.window.activeTextEditor ?? textEditor).selection.active)
                           });
-                        } catch {}
+                        } catch (e) {
+                            logError(`Failed to post message in translation loop: ${e}`);
+                        }
                     } catch (error) {
                         logError(`Translation failed for goal: ${error}`);
                     }
-                })).catch(() => {});
+                })).catch((e) => {
+                    logError(`Error in Promise.all for translations: ${e}`);
+                });
+                }
             }
             
             currentPosition = position;
             try {
                 // Non-blocking incremental update via postMessage
-                try {
-                  currentPanel.webview.postMessage({
+                currentPanel.webview.postMessage({
                     type: 'goalsData',
                     goals: currentGoals,
                     translationEnabled: translationService.isTranslationEnabled(),
                     positionLocked,
                     lockedLine: currentPosition?.line ?? null,
                     cursorModeLabel: cursorModeLabelNow,
-                    goalHistoryStatus: currentGoals.map((_, index) => codeModifier.canRollbackSafely(index, textEditor.document))
-                  });
-                } catch {}
+                    // Use actual selection for canRollback, not logical cursor
+                    canRollback: await codeModifier.canRollbackInCurrentBlock(textEditor.document, (vscode.window.activeTextEditor ?? textEditor).selection.active)
+                });
             } catch (e) {
                 logDebug(`Webview update failed (maybe disposed): ${e}`);
                 currentPanel = undefined;
@@ -351,6 +682,8 @@ export function activate(context: vscode.ExtensionContext) {
             
         } catch (error) {
             logError(`Failed to update goals: ${error}`);
+        } finally {
+            isUpdating = false;
         }
     };
 
@@ -358,7 +691,9 @@ export function activate(context: vscode.ExtensionContext) {
     let debounceTimer: NodeJS.Timeout | undefined;
     const triggerUpdate = (editor?: vscode.TextEditor) => {
         if (debounceTimer) clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => updateProofGoals(editor ?? vscode.window.activeTextEditor), debounceMs());
+        const target = editor ?? vscode.window.activeTextEditor;
+        if (!target) return;
+        debounceTimer = setTimeout(() => updateProofGoals(target), debounceMs());
     };
 
     const onActiveEditorChange = vscode.window.onDidChangeActiveTextEditor((editor) => triggerUpdate(editor));
@@ -373,12 +708,18 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(
         startProofBuilderCommand,
+        insertHaveCmd,
+        insertHaveAdmit,
+        insertHaveDeny,
+        insertHaveAdmitWithHistory,
+        rollbackCurrentBlock,
         cycleCursorModeCommand,
         analyzeCommand,
+        astTestCommand,
         onActiveEditorChange,
         onSelectionChange,
         onTextChange,
-        leanClient,
+        codeModifier,
         translationService,
         outputChannel
     );
@@ -439,18 +780,21 @@ function createProofGoalsPanel(
             translationEnabled: translationService?.isTranslationEnabled() ?? false,
             positionLocked: s.positionLocked,
             lockedLine: s.lockedPosition?.line ?? null,
-            goalHistoryStatus: (() => {
+            cursorModeLabel: cursorModeManager ? cursorModeManager.getModeConfig().label : undefined,
+            canRollback: (() => {
               const activeEditor = vscode.window.activeTextEditor;
-              if (!activeEditor) return s.goals.map(() => false);
-              return s.goals.map((_, index) => codeModifier?.canRollbackSafely?.(index, activeEditor.document) ?? false);
+              if (!activeEditor) return false;
+              // Best effort: compute at current selection
+              // Note: async check isn't available here; keep false for initial render
+              return false;
             })()
           });
-        } catch {}
+        } catch (e) {}
     }, null, context.subscriptions);
 
     // Handle panel disposal
     panel.onDidDispose(() => {
-        try { onDisposed(); } catch {}
+        try { onDisposed(); } catch (e) {}
     }, null, context.subscriptions);
 
     return panel;
@@ -508,7 +852,6 @@ function getWebviewContent(
                 <div class="actions">
                     <button onclick="sendFeedback(${index}, 'admit')" class="btn admit">✓ 正确</button>
                     <button onclick="sendFeedback(${index}, 'deny')" class="btn deny">✗ 错误</button>
-                    ${hasHistory ? `<button onclick="sendFeedback(${index}, 'rollback')" class="btn rollback">↶ 回滚</button>` : ''}
                 </div>
             </div>
         `;
@@ -596,6 +939,7 @@ function getWebviewContent(
                 .btn.cursor-mode { background: #17a2b8; color: white; margin-right: 10px; }
                 .btn.translation { background: #007acc; color: white; margin-right: 10px; }
                 .btn.rollback { background: #fd7e14; color: white; margin-right: 10px; }
+                .btn.rollback.disabled { opacity: 0.5; cursor: not-allowed; filter: grayscale(40%); }
                 .toolbar { display: flex; align-items: center; justify-content: space-between; }
                 .lock-info { color: var(--vscode-descriptionForeground); margin-left: 10px; }
                 h1 {
@@ -615,6 +959,7 @@ function getWebviewContent(
                 </button>
                 <button onclick="toggleTranslation()" class="btn translation">${translationLabel}</button>
                 <button onclick="toggleLock()" class="btn lock">${lockLabel}</button>
+                <button onclick="rollbackCurrent()" class="btn rollback disabled">↶ 回滚</button>
                 ${lockInfo}
               </div>
             </div>
@@ -652,7 +997,10 @@ function getWebviewContent(
                     console.log('toggleTranslation clicked');
                     vscode.postMessage({ goalIndex: -1, action: 'toggleTranslation' });
                 }
-                
+                function rollbackCurrent() {
+                    console.log('rollbackCurrent clicked');
+                    vscode.postMessage({ goalIndex: -1, action: 'rollback' });
+                }
                 
                 // Test if buttons exist
                 document.addEventListener('DOMContentLoaded', function() {
@@ -663,7 +1011,7 @@ function getWebviewContent(
                         console.log('Translation button text:', translationBtn.textContent);
                     }
                 });
-                function buildGoalHtml(goal, index, translationEnabled, hasHistory) {
+                function buildGoalHtml(goal, index, translationEnabled) {
                   const hasTranslation = !!translationEnabled;
                   const isError = !!goal.translationError;
                   const rawText = goal.translation ? goal.translation : (isError ? '' : '翻译中...');
@@ -692,7 +1040,6 @@ function getWebviewContent(
                     + '<div class="actions">'
                     + '<button class="btn admit" data-idx="' + index + '">✓ 正确</button>'
                     + '<button class="btn deny" data-idx="' + index + '">✗ 错误</button>'
-                    + (hasHistory ? ('<button class="btn rollback" data-idx="' + index + '">↶ 回滚</button>') : '')
                     + '</div>'
                     + '</div>'
                   );
@@ -702,7 +1049,7 @@ function getWebviewContent(
                   const root = document.getElementById('goals-root');
                   if (!root) return;
                   const goals = Array.isArray(data.goals) ? data.goals : [];
-                  const html = goals.map((g, i) => buildGoalHtml(g, i, !!data.translationEnabled, !!(data.goalHistoryStatus && data.goalHistoryStatus[i]))).join('');
+                  const html = goals.map((g, i) => buildGoalHtml(g, i, !!data.translationEnabled)).join('');
                   root.innerHTML = html;
                   // update toolbar lock state label/info if provided
                   if (typeof data.positionLocked === 'boolean') {
@@ -720,6 +1067,12 @@ function getWebviewContent(
                     const cbtn = document.querySelector('.btn.cursor-mode');
                     if (cbtn) cbtn.textContent = data.cursorModeLabel;
                   }
+                  // Update rollback button style (disabled look but still clickable)
+                  const rbtn = document.querySelector('.btn.rollback');
+                  if (rbtn) {
+                    if (data.canRollback) rbtn.classList.remove('disabled');
+                    else rbtn.classList.add('disabled');
+                  }
 
                   // Attach click handlers (avoid inline onclick to prevent quoting issues)
                   root.querySelectorAll('.btn.admit').forEach((btn) => {
@@ -734,12 +1087,7 @@ function getWebviewContent(
                       sendFeedback(idx, 'deny');
                     });
                   });
-                  root.querySelectorAll('.btn.rollback').forEach((btn) => {
-                    btn.addEventListener('click', () => {
-                      const idx = parseInt(btn.getAttribute('data-idx') || '0', 10);
-                      sendFeedback(idx, 'rollback');
-                    });
-                  });
+                  // rollback handled by toolbar button
                   renderTranslations();
                 }
 
@@ -754,6 +1102,13 @@ function getWebviewContent(
                   if (msg && msg.type === 'translationState') {
                     const btn = document.querySelector('.btn.translation');
                     if (btn) btn.textContent = msg.enabled ? '🌐 关闭翻译' : '🌐 开启翻译';
+                  }
+                  if (msg && msg.type === 'canRollbackState') {
+                    const rbtn = document.querySelector('.btn.rollback');
+                    if (rbtn) {
+                      if (msg.canRollback) rbtn.classList.remove('disabled');
+                      else rbtn.classList.add('disabled');
+                    }
                   }
                   if (msg && msg.type === 'goalsData') {
                     renderGoalsData(msg);

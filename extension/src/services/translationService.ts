@@ -14,8 +14,8 @@ export class TranslationService {
     private outputChannel: vscode.OutputChannel;
     private pendingRequests = new Map<string, Promise<TranslationResult>>();
 
-    constructor() {
-        this.outputChannel = vscode.window.createOutputChannel("MathEye Translation");
+    constructor(outputChannel: vscode.OutputChannel) {
+        this.outputChannel = outputChannel;
     }
 
     /**
@@ -183,6 +183,5 @@ ${goalText}`;
     dispose(): void {
         this.cache.clear();
         this.pendingRequests.clear();
-        this.outputChannel.dispose();
     }
 }

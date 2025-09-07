@@ -1,297 +1,137 @@
-## MathEye Proof Builder
+# MathEye — AST‑First Proof Builder (Lean 4 + VSCode)
 
-An interactive, low‑code proof builder for Lean 4. This README explains how the system runs end‑to‑end, what data we can access today, what granularity we aim for (goals, hypotheses, local context, AST/syntax), and how we plan to evolve the RPC contract to unlock richer functionality.
+MathEye 是一个“AST 优先”的 Lean 4 扩展与服务器模块：所有编辑都在 Lean 端基于 `Syntax` 进行结构化修改，统一交由 Lean 的 formatter 输出；VSCode 端仅以一个 TextEdit 落地该子树的文本。无正则、无字符串拼接。
 
----
-
-### Architecture (one‑look overview)
-
-- **VS Code extension (TypeScript)**
-  - Paperproof‑style panel显示当前 goals，并提供交互按钮（✓ 正确 / ✗ 错误 / 固定光标 / 翻译开关）
-  - 通过 vscode‑lean4 复用内置服务（如 `$ /lean/plainGoal`），并调用自定义 Lean RPC（`MathEye.*`）
-  - 根据用户反馈在活动 `.lean` 文档中插入编辑
-
-- **Lean side（Lean 4 包）**
-  - 用 `@[server_rpc_method]` 定义 RPC 方法
-  - 读取 `InfoTree`、`Syntax`、`LocalContext` 等，计算插入点与（未来）结构化上下文
-
-- **Bridge（vscode‑lean4）**
-  - `$ /lean/plainGoal`：获取易读的目标（含 hypotheses）
-  - `$ /lean/rpc/connect` + `$ /lean/rpc/call`：调用自定义 RPC（如 `MathEye.getInsertionPoint`）
-
----
-
-### 运行流程（一次点击从 UI 到代码）
-
-1) 用户在面板对某个 goal 点 ✓ 或 ✗。
-2) 扩展用 `$/lean/plainGoal` 刷新 goals，并调用自定义 RPC：`MathEye.getInsertionPoint`，让 Lean 给出“语义上的插入点”（tactic 尾部）。
-3) 扩展根据动作：
-   - ✓：插入 `have h : <goal> := by sorry` + `exact h`
-   - ✗：插入 `have h : ¬ (<goal>) := by sorry`
-   插入点与缩进以 Lean 返回的位置为准，必要时起新行。
-4) 通过 `workspace.applyEdit` 应用编辑。
-
----
-
-### 我们现在能拿到的数据粒度（实际可用）
-
-- 来自 `$ /lean/plainGoal`（稳定，已用）：
-  - `goals: [ { hyps: string[], goal: string } ]`（由 vscode‑lean4 提供）
-  - 我们将 `hyps` 拼接并在末行加 `⊢ goal`，作为当前可显示/插入的“目标字符串”。
-
-- 来自 `MathEye.getInsertionPoint`（已实现）：
-  - 输入：`pos`（LSP 光标位置）
-  - 输出：`pos`（tactic 语法节点的尾位置）。我们用它来避免基于正则的插入点猜测。
-
-结论：目前“最小闭环”仅依赖 goal 的字符串展示与 tactic 尾插入；这适合 MVP，但不足以驱动更智能的代码生成。
-
----
-
-### 我们期望的更细粒度（提议中的 Lean 侧 RPC）
-
-目标：不只要字符串，还要拿到结构化上下文与语法信息，从而：
-- 精确获得局部变量列表、类型（以及 binderInfo：显式/隐式/实例隐式）
-- 区分哪些 hypothesis/locals 应作为 lemma 参数，哪些保留为隐式
-- 提供稳定的 pretty‑print 输出，避免前端自行拼接
-
-拟新增 RPC（均基于 `InfoTree`/`LocalContext`/`MetavarContext`/`Syntax`）：
-
-1) `MathEye.getStructuredContext`（上下文结构）
-- 输入：`pos`
-- 输出：
-  - `tacticRange`: `{ start, stop }`
-  - `goal`: pretty‑printed type
-  - `locals`: `{ name, type, binderInfo }[]`
-  - `hyps`: `{ name, type }[]`
-- 用途：生成参数化 lemma 骨架，自动补全 `exact` 的实参等。
-
-2) `MathEye.getInsertionSpec`（插入策略）
-- 输入：`pos`
-- 输出：`{ kind: "appendTail", pos } | { kind: "replaceSorry", range }`
-- 用途：由 Lean 决定在 tactic 中“追加”还是“替换 sorry”，前端只执行编辑。
-
-3) `MathEye.getTacticBounds`（tactic 边界）
-- 输入：`pos`
-- 输出：`{ start, tail, end }`（LSP 坐标）
-- 用途：多行插入、重排等需要准确块边界的编辑。
-
-4) `MathEye.prettyPrint(expr/id)`（统一渲染）
-- 输入：某个表达式或名称
-- 输出：稳定字符串
-- 用途：避免 TS 侧字符串拼接的“反繁饰/去糖”不一致问题。
-
-备注：AST 本体不直接跨 RPC 传输（体量与稳定性问题），而是由 Lean 侧基于 `InfoTree` 提供“结构化摘要”（context/spec/pretty），满足可用性与兼容性。
-
----
-
-### 目前的前端编辑策略
-
-- 语义插入点：调用 `MathEye.getInsertionPoint` 获取 tactic 尾部。
-- 缩进：基于当前行与编辑器设置（tabSize/insertSpaces）选择缩进；必要时起新行。
-- 片段：
-  - admit：`have h : <goal> := by sorry` + `exact h`
-  - deny：`have h : ¬ (<goal>) := by sorry`
-- 不自动替换 `sorry`（将来由 `getInsertionSpec` 决定）。
-
-### 光标模式（Cursor Modes）
-
-- **概述**：提供三种光标模式，用于决定“获取目标的位置”和“应用编辑（✓/✗）的位置/范围”。
-- **模式**：
-  - **当前光标（Current）**：按实际光标位置获取目标并插入编辑。
-  - **By 块开始（By Start）**：将逻辑光标视为在当前 by 块的 `by` 之后；对 ✓/✗ 可能删除从 by 开始到块尾的内容后再插入。
-  - **By 块末尾（By End）**：将逻辑光标视为在当前 by 块末尾；通常直接在块尾插入。
-- **切换方式**：
-  - Webview 按钮：点击面板中的光标模式按钮循环切换。
-  - 命令面板：运行 “Cycle Cursor Mode”。
-  - 快捷键：为命令 `matheye.cycleCursorMode` 配置键位。
-- **与编辑策略的关系**：仅影响“目标显示”和“插入/删除范围”；生成的 admit/deny 片段与缩进规则仍遵循上文的前端编辑策略。
-- **故障排除**：若 By 模式识别异常，确认光标位于有效 by 块内，或切回“当前光标”模式。
-- **实现参考**：`extension/src/services/cursorModeManager.ts`。
-
----
-
-### 反繁饰与一致性
-
-- 依赖 Lean 侧 pretty‑print：避免前端对 `¬`, `∧` 等自己做去糖；Lean 给出“人可读且稳定”的字符串。
-- 名称与实参顺序：在 `getStructuredContext` 中由 Lean 侧判定/建议，前端只渲染。
-
----
-
-### 构建、调试与测试（标准流程）
-
-- 构建
-  - `cd extension && npm ci && npm run compile`
-
-- 本地调试（推荐）
-  - F5 选择：`Run MathEye Extension (Open example/Basic.lean)`（会自动打开示例）
-  - 设置 `matheye.logLevel = debug`，在“输出→MathEye”查看 RPC/反馈日志
-
-- 单元测试
-  - `cd extension && npm test`
-  - 当前测试涵盖：缩进、deny 生成 `¬`、不同 tabSize 的缩进
-
----
-
-### 从本仓库安装到本地（开发/试用）
-
-1) 先决条件
-   - 安装 VS Code 与 vscode‑lean4 扩展
-   - 安装 Node.js 18+ 与 npm
-   - 安装 Lean 工具链（本仓库自带 `lean-toolchain` 指定版本）
-
-2) 获取代码并构建扩展
+## 快速使用
 ```bash
-git clone <this-repo>
-cd matheye-proof-builder/extension
-npm ci
+# 1) 构建 Lean 侧
+lake build
+
+# 2) 构建 VSCode 扩展
+cd extension
+npm install
 npm run compile
+
+# 3) VSCode 中按 F5 启动扩展宿主
+# 打开 .lean 文件，将光标放进 by 块
+# 在命令面板中运行：
+#  - MathEye: Start Proof Builder（推荐 UI 流程）
+#    在面板中使用“✅/❌”按钮提交反馈（见本文下方“UI 使用指南”）。
+#  - 或直接运行：MathEye: Insert Have (Admit) / (Deny)（快捷命令）
 ```
 
-3) 本地运行（调试方式，推荐）
-- 在仓库根目录打开 VS Code，按 F5 选择 `Run MathEye Extension (Open example/Basic.lean)`。
-- 在新开的开发主机窗口中打开任意 `.lean` 文件，运行 “MathEye: Start Proof Builder”。
+### 配置
+- `matheye.fullFileReplace`（已废弃，现始终启用整篇替换）
+  - 为避免 Lean 服务器快照与 VSCode 文档状态长期漂移，现统一采用“整篇替换”策略：
+    客户端以服务器返回的 AST 子树编辑为依据，确定性地合成新的整篇文档文本，并一次性替换整个文件。
+  - 该选项保留于 package.json 仅作占位，当前实现不再读取此配置。
 
-4) 或打包 VSIX 安装
-```bash
-cd matheye-proof-builder/extension
-npm run compile
-npx vsce package
-# 生成 .vsix 后，在 VS Code 扩展面板中“从 VSIX 安装”
-```
+### 命令
+- `MathEye: Insert Have (Admit)` — 在 by 块尾部追加 `have` + `exact`
+- `MathEye: Insert Have (Deny)` — 在 by 块尾部追加 `have … : ¬(goal)`
+- `MathEye: Insert Have Snippet` — 调试辅助（生产流不使用）
 
-注意：若已安装过同名扩展，建议先禁用/卸载再安装 VSIX，避免多个实例冲突。
+提示：若文件顶部缺少 `import MathEye` 与 `macro "human_oracle" : tactic => `(tactic| sorry)`，扩展会自动注入一次，随后再调用 RPC。
 
----
+## UI 使用指南（Proof Builder 面板）
 
-#### 通过本地目录安装（Install Extension from Location）
+启动方式：
+- 打开 Lean 4 文件，在命令面板运行 “MathEye: Start Proof Builder”。
+- 视图将显示当前光标处的 proof goals，并提供交互按钮。
 
-不打包 VSIX，直接从目录安装扩展：
+面板元素与按钮：
+- 目标列表：显示当前 goals（Lean 原始 pretty 文本）。
+- ✅ 接受（Admit）：
+  - 语义：在逻辑光标到 by 块结尾处删除旧战术（服务器 AST 裁剪），随后在 by 块末尾追加 `have h : goal := by human_oracle` 与 `exact h`。
+  - 行为：完全在服务器 AST 上完成，VSCode 仅落地一个 TextEdit 于该 by 块范围。
+- ❌ 拒绝（Deny）：
+  - 语义：同样裁剪光标之后的战术，并在 by 块末尾追加 `have h : ¬(goal) := by human_oracle`（不追加 exact）。
+- 🔒 锁定光标（Toggle Lock）：
+  - 固定当前的逻辑光标位置，避免你移动实际光标时 UI 抖动或短暂 0-goal 状态。
+- 🔁 切换光标模式（Cycle Cursor Mode）：
+  - 三种模式：
+    - 当前光标（CURRENT）
+    - By 块开始（BY_START）
+    - By 块末尾（BY_END）
+  - 逻辑光标用于定义“从光标到末尾”的裁剪区间（服务器 AST 裁剪）。
+- 🌐 目标翻译（Toggle Translation）：
+  - 显示/隐藏自然语言翻译（若启用翻译服务）。
+- ↩️ 回滚（Rollback）：
+  - 恢复最近一次在当前 by 块中应用的插入操作（范围与文本基于历史记录严格匹配）。
 
-1) 先编译扩展
-```bash
-cd matheye-proof-builder/extension
-npm run compile
-```
-2) 在 VS Code 打开命令面板，运行 “Developer: Install Extension from Location…”。
-3) 选择路径：`/Users/sjm/coding/projects/lean-plugin/matheye-proof-builder/extension`。
-4) 安装完成后执行 “Developer: Reload Window”。
+注意：
+- 面板中的所有编辑都通过服务器 AST 执行，并且只替换 by 块对应的最小文本范围（除非你启用了整篇替换）。
+- 文件顶部如缺少宏 `macro "human_oracle" : tactic => `(tactic| sorry)`，会自动注入一次。
 
-说明：这种安装方式基于本地目录（类似符号链接）。更新代码后再次 `npm run compile` 并重载窗口即可生效；卸载可在“扩展”面板正常卸载。
+## 端到端设计
 
----
+### 客户端（VSCode）
+- `CursorModeManager`
+  - 通过服务器 `getByBlockRange` 获取精准 by 块范围，计算逻辑光标与删除区间（异步、AST 背书）。
+  - 已移除所有正则扫描与缩进推断逻辑。
+- `CodeModifierService`
+  - 调用服务器 `insertHaveByAction(pos, action)` 执行“从逻辑光标到末尾裁剪 + 追加 have”并格式化子树。
+  - 始终合成整篇文档并以单一 TextEdit 替换整文件，杜绝局部替换导致的快照漂移。
+  - 文件顶部缺失 `human_oracle` 宏时自动注入一次。
+- `LeanClientService`
+  - 封装 `getByBlockRange`、`insertHaveByAction`，负责 VSCode Range 转换与 RPC 调用。
 
-### 目标翻译（可选，OpenAI）
+### Proof Builder 面板架构
+- 命令 `MathEye: Start Proof Builder` 创建/更新面板并监听：
+  - 光标移动/选择变化 → 触发异步刷新（防抖）
+  - 文档变化 → 跟随 Lean 重新 elaboration 的窗口刷新
+- 面板与 CodeModifier/TranslationManager 协作：
+  - 接收 UI 按钮事件（✅/❌/锁定/翻译开关/回滚/光标模式切换）
+  - 通过 LeanClientService 调用服务器 RPC，更新文档与 UI
 
-- 面板可显示“自然语言”翻译。要启用：
-  - 在 VS Code 设置中填入 `matheye.openai.apiKey`，或
-  - 设置环境变量 `OPENAI_API_KEY`
-- 可选配置：`matheye.openai.model`、`matheye.openai.baseUrl`、`matheye.openai.timeout`
-- 未配置 API key 时会提示并退化为原文显示。
+### 服务器（MathEye.lean）
+- `getByBlockRange(pos)`
+  - 利用 `r.tacticInfo.stx.getRange?` 返回当前 by 块的 `RangeDto`。
+- `insertHaveByAction(pos, action)`
+  - 以客户端传入的 by 块范围确定容器；在容器内选择稳定锚点读取目标类型（失败直接报错，不做 `_` 回退）。
+  - AST-only：保留稳定锚点前的 tactics，整体裁剪其后，解析并追加 have/exact，重建 tacticSeq；
+  - PrettyPrinter 打印正文，并按“容器起始列”做固定缩进嵌入；返回 `{ range, newText }`（容器最小范围与文本）。
 
----
+### 为什么是 AST‑Only 且安全
+- 所有结构性修改都在服务器 `Syntax` 执行，无正则、无字符串层修补。
+- parser 仅用于“生成 `Syntax`”，不用于“搜索/替换文本”。
+- LSP 落地必须是文本编辑；我们只做一个 TextEdit（by 块范围），不会牵动其它区域（除非你启用整篇替换）。
 
-### 当前实现的关键代码
+## 测试与脚手架
+- Lean 构建：`lake build`
+- 扩展构建：`cd extension && npm install && npm run compile`
+- VSCode 集成测试脚手架（需在 VSCode 测试宿主运行）：
+  - `extension/src/test/suite/runTest.ts`
+  - `extension/src/test/suite/suite.ts`
+  - 运行（mock）：`npm run test:integration`
+  - 运行（real, 在线）：`MATHEYE_USE_REAL_RPC=1 npm run test:integration`
+  - 运行（real, 离线 VSIX）：`MATHEYE_USE_REAL_RPC=1 MATHEYE_LEAN4_VSIX=/abs/path/leanprover.lean4-*.vsix npm run test:integration`
+  - 运行（real, 离线目录预置，推荐）：
+    - `mkdir -p extension/out/.vscode-test/extensions`
+    - `ln -s ~/.cursor/extensions/leanprover.lean4-0.0.209-universal extension/out/.vscode-test/extensions/`
+    - `MATHEYE_USE_REAL_RPC=1 npm run test:integration`
+  - 测试做了什么：打开合成 Lean 文件，将光标放在“`|` 前”和“`=>` 后（含/不含空格）”，执行 `matheye.insertHaveAdmit`，断言插入结构正确；测试会将“前快照（*.pre.out.lean）/后快照（*.post.out.lean）”写入 `extension/out/test/suite`；并对后快照执行 `lake env lean` 编译验证。
+ 
+### 本仓样例与清理
+- `test_cases/` 仅保留 `.lean` 样例；所有结果日志、临时与调试产物均已清理。
+- 历史 Round‑Trip 记录移动至 `logs/roundtrip_outputs.log`，仅供参考。
 
-```53:73:MathEye.lean
-@[server_rpc_method]
-def getInsertionPoint (params : InputParams) : RequestM (RequestTask InsertionPoint) := do
-  withWaitFindSnapAtPos params.pos fun snap => do
-    let doc ← readDoc
-    let text : FileMap := doc.meta.text
-    let hoverPos : String.Pos := text.lspPosToUtf8Pos params.pos
-    let results := snap.infoTree.goalsAt? text hoverPos
-    match results.head? with
-    | some r =>
-      let stx := r.tacticInfo.stx
-      let stxTailPos := stx.getTailPos?.getD (stx.getPos?.getD hoverPos)
-      let tailLsp := text.utf8PosToLspPos stxTailPos
-      return { pos := tailLsp }
-    | none =>
-      return { pos := params.pos }
-```
+## 我们删掉了什么
+- 移除所有正则/启发式路径及其调用：无“by/sorry”扫描、无缩进猜测、无文本拼接。
+- 移除 `SmartByBlockFinder` 及依赖；不再使用 AST 测试工具（扩展内旧的 jixia 调用）。
+- 仅保留必要的历史/回滚记录（基于 Range），其余冗余代码已清理。
 
-```96:143:extension/src/extension.ts
-leanClient.getInsertionPoint(posNow, editorNow.document).then((insPos) => {
-  const rawAction = (message.action || '').trim();
-  const act = rawAction === 'admit' ? 'admit' : 'deny';
-  codeModifier.applyFeedback(editorNow.document, goalsNow, { goalIndex: message.goalIndex, action: act }, insPos, { useExactPosition: true });
-});
-```
+## 生产不变式（硬约束）
+- 只在 AST 层编辑；仅替换最小容器范围；无正则、无字符串拼接。
+- 容器确定性：客户端传入 by 块范围；服务端在容器内选择稳定锚点读取类型。
+- 无回退：类型读取失败直接报错（不使用 `_`）。
+- PrettyPrinter 输出 + 固定列缩进嵌入；头部形态不被改写（内联时使用“=>\n + 正文”合法形态）。
 
-```31:61:extension/src/services/codeModifier.ts
-const normalized = (feedback.action || 'admit').trim();
-const action: 'admit' | 'deny' = normalized === 'deny' ? 'deny' : 'admit';
-// admit: have+exact; deny: have : ¬ (...)
-```
+## 弃用/开发专用接口
+- 文档：`docs/DEPRECATED_APIS_CN.md`
+- 代码保留但不在生产调用；如需启用，务必补充 E2E/real 测试并复核不变式。
 
----
-
-### 路线图摘要
-
-- Lean 侧提供结构化上下文（`getStructuredContext`）→ 支持自动生成 lemma 骨架与实参。
-- Lean 侧提供插入策略（`getInsertionSpec`）→ 统一“替换 sorry / 追加尾部”。
-- 统一 prettyPrint → 消除前端去糖与格式分歧。
-
-
----
-
-## 附录：结构化上下文与外部项目整合（规划草案）
-
-以下为后续实现所需的技术路线与集成方案，仅做规划记录，暂不落地实现。
-
-### 目标与可行性
-- 目标：从“字符串的前提和 goal”升级到“结构化上下文 + 语义 AST”，拿到每个变量的类型、依赖关系、源位置，并可稳定序列化，支持后续智能编辑与分析。
-- 可行性：Lean elaboration 产出的 InfoTree 与 Meta 层能提供全部所需（`LocalContext`、`Expr`、`Syntax`、位置），适合在 Lean 侧通过 RPC 暴露 JSON 结构给前端。
-
-### 建议的 Lean 侧 RPC：getStructuredContext(pos)
-- 输入：`pos: LSP.Position`
-- 输出（JSON 形状建议）：
-  - `tacticRange`: `{ start, stop }`（当前 tactic 的 LSP 范围）
-  - `goal`: `{ pretty: string, freeVars: string[] }`（pretty 供展示，freeVars 来自 `Expr.collectFVars`）
-  - `locals`: `[{ name, typePretty, binderInfo, isLet, dependsOn: string[] }]`（从 `LocalContext` 提取，`dependsOn` 基于 `collectFVars`）
-- 实现要点：
-  - `withWaitFindSnapAtPos` → `infoTree.goalsAt?` 找到 `TacticInfo`
-  - 在 `TacticInfo.runMetaM` 中读取 `goal`/`LocalContext`、序列化 `Expr`（见下）与 pretty 打印
-  - `Syntax` 位置信息用 `stx.getRange?` + `FileMap` 转 LSP
-
-### Expr 序列化（机器可分析）
-- 不直接吐 Lean 内部 `Expr`；定义轻量 JSON AST（节点如 `const/app/lam/forall/letE/fvar/bvar/lit/proj` 等）。
-- 去循环可选；体量控制：限制深度/节点数，超限做截断标记。
-- 展示用 `pretty`（delab/pp），分析用 `Expr JSON`；两者并存，避免 delab 失真影响分析。
-
-### 变量依赖与关联
-- 对 `LocalDecl.type` 与 `goal.type` 执行 `collectFVars`，映射到局部名，得到：
-  - `dependsOn(local)` 图：某局部类型依赖哪些局部
-  - `goal.freeVars`：目标中用到哪些局部
-- 可反向索引：某局部被谁引用。
-
-### 性能与稳定性
-- 仅围绕“当前 tactic”构建上下文，限制 JSON 深度与节点数；对大表达式标注“截断”。
-- 用 `CheckIfUserIsStillTyping`（Paperproof 思路）规避不稳定 InfoTree。
-
-### 与外部项目的整合（不立即实现）
-- jixia（`../jixia`）：
-  - 已有 `collectFVars`、InfoTree/Meta 访问、elab/decl JSON 等分析基础。
-  - 方案：在 jixia 侧添加 `@[server_rpc_method] getStructuredContext`，输出上文 JSON；或将其 Analyzer 作为 Lean 包引入本项目，由本项目暴露 RPC。
-- Paperproof（`../paperproof`）：
-  - 已有 `@[server_rpc_method] Paperproof.getSnapshotData`，基于增强版 `goalsAt?` 与 `BetterParser` 产出结构化 proof steps（goal before/after、依赖、位置等）。
-  - 方案：前端并发请求：
-    - `Paperproof.getSnapshotData`：驱动步骤视图（用户熟悉的语义行为）
-    - `MathEye.getStructuredContext`（本项目或 jixia 提供）：补充 Meta 级上下文（locals/dependsOn/Expr）
-  - 翻译/耗时分析维持异步，不阻塞 UI；先渲染结构，再渐进填充。
-
-### 前端使用建议（保持非阻塞）
-- 仍可用 `$ /lean/plainGoal` 快速显示 goal。
-- 并发获取结构（Paperproof steps + structured context），优先渲染结构；翻译等异步更新“翻译中…”。
-- 变量点击/hover 用 `dependsOn/freeVars` 做高亮与依赖图。
-
-### 阶段性路线
-- 阶段 1：实现 `getStructuredContext`（tacticRange、goal.pretty/freeVars、locals+dependsOn）。
-- 阶段 2：结合 Paperproof 的 steps，完善编辑策略（追加/替换、精确范围）。
-- 阶段 3：引入 `suggestLemmaSignature`、统一 prettyPrint、变量/子表达式到源位置映射等高级功能。
-
-### TODO（优先级低）
-- 语义一致的唯一命名 RPC：`getUniqueName(base, pos)`
-  - Lean 侧根据插入点的 LocalContext 选择 `h_annotated_i` 中最小未用的 i，返回严格唯一的名字，避免前端文本扫描误判。
-  - 扩展侧在插入前调用，失败时回退到临时计数器，并提示用户。
-
+## 运维与扩展
+- 宏注入：若缺失，首次在文件顶部注入 `macro "human_oracle" : tactic => `(tactic| sorry)`，以确保 `by human_oracle` 可编译。
+- Range 仅用于“落地”AST 修改（TextEdit），不用于字符串切片。
+- 要新增 AST 编辑：按照同一模式新增 Lean RPC，返回 `{ range, newText }`；客户端仅应用该编辑即可。

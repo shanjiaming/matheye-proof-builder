@@ -3,11 +3,36 @@ import * as vscode from 'vscode';
 /**
  * Represents a single operation that can be undone
  */
+export interface AnchorPathItem { kind: string; idx: number }
+
 export interface HistoryOperation {
+    // core intent
     type: 'admit' | 'deny';
-    goalIndex: number;                  // 关联的目标索引
-    byBlockRange: vscode.Range;         // 整个by block的范围
-    originalByBlockContent: string;     // 整个by block的原始内容
+    goalIndex: number;
+    // anchor (MVP)
+    declName?: string;
+    path?: AnchorPathItem[];
+    originalBody?: string;
+    anchorPos?: { line: number; character: number };
+    // legacy fields (kept temporarily until anchor-based rollback is wired end-to-end)
+    byBlockRange: vscode.Range;
+    originalByBlockContent: string;
+    insertedText: string;
+    replacedText?: string;
+    documentVersion?: number;
+    byBlockStartLine: number;
+    insertRelStartLine: number;
+    insertRelStartChar: number;
+    insertRelEndLine: number;
+    insertRelEndChar: number;
+    absStartLine: number;
+    absStartChar: number;
+    absEndLine: number;
+    absEndChar: number;
+    replacedRangeStartLine?: number;
+    replacedRangeStartChar?: number;
+    replacedRangeEndLine?: number;
+    replacedRangeEndChar?: number;
     timestamp: number;
     documentUri: string;
 }
@@ -16,7 +41,7 @@ export interface HistoryOperation {
  * Manages history for rollback functionality in have by blocks
  */
 export class HistoryManager {
-    private operationsByGoal: Map<number, HistoryOperation[]> = new Map();
+    private operationsByDoc: Map<string, HistoryOperation[]> = new Map();
     private outputChannel: vscode.OutputChannel;
 
     constructor() {
@@ -27,139 +52,110 @@ export class HistoryManager {
      * Record a new operation that can be rolled back
      */
     recordOperation(operation: HistoryOperation): void {
-        const goalIndex = operation.goalIndex;
-        if (!this.operationsByGoal.has(goalIndex)) {
-            this.operationsByGoal.set(goalIndex, []);
+        const key = operation.documentUri;
+        if (!this.operationsByDoc.has(key)) {
+            this.operationsByDoc.set(key, []);
         }
-        this.operationsByGoal.get(goalIndex)!.push(operation);
+        this.operationsByDoc.get(key)!.push(operation);
         this.outputChannel.appendLine(
-            `Recorded ${operation.type} operation for goal ${goalIndex} (${this.operationsByGoal.get(goalIndex)!.length} operations total)`
+            `Recorded ${operation.type} op for doc ${key} (stack size: ${this.operationsByDoc.get(key)!.length})`
         );
     }
 
     /**
      * Check if there's an operation that can be rolled back for a specific goal
      */
-    canRollback(goalIndex: number): boolean {
-        const operations = this.operationsByGoal.get(goalIndex);
-        return operations ? operations.length > 0 : false;
+    canRollbackForDocument(document: vscode.TextDocument): boolean {
+        const ops = this.operationsByDoc.get(document.uri.toString());
+        return !!(ops && ops.length > 0);
     }
 
     /**
      * Check if there's a rollback operation available and if it's likely still valid (synchronous check)
      */
-    canRollbackSafely(goalIndex: number, document: vscode.TextDocument): boolean {
-        const operations = this.operationsByGoal.get(goalIndex);
-        if (!operations || operations.length === 0) {
-            return false;
+    canRollbackSafelyInBlock(document: vscode.TextDocument, blockRange: vscode.Range): boolean {
+        const ops = this.operationsByDoc.get(document.uri.toString());
+        if (!ops || ops.length === 0) return false;
+        const content = document.getText(blockRange);
+        // Find last op whose insertedText exists exactly in current block content
+        for (let i = ops.length - 1; i >= 0; i--) {
+            const op = ops[i];
+            if (content.includes(op.insertedText)) return true;
         }
-
-        const operation = operations[operations.length - 1]; // Get the latest operation
-
-        // Strict checks only
-        try {
-            // Check if document URI matches
-            if (document.uri.toString() !== operation.documentUri) {
-                return false;
-            }
-
-            // Check if the by block range is still within document bounds (strict)
-            const currentRange = operation.byBlockRange;
-            if (currentRange.start.line >= document.lineCount || currentRange.end.line >= document.lineCount) {
-                return false;
-            }
-
-            // This is a basic but strict check
-            return true;
-            
-        } catch (error) {
-            return false;
-        }
+        return false;
     }
 
     /**
      * Get the operation for a specific goal
      */
-    getOperation(goalIndex: number): HistoryOperation | null {
-        const operations = this.operationsByGoal.get(goalIndex);
-        return operations && operations.length > 0 ? operations[operations.length - 1] : null;
+    getLastOperationForDocument(document: vscode.TextDocument): HistoryOperation | null {
+        const ops = this.operationsByDoc.get(document.uri.toString());
+        return ops && ops.length > 0 ? ops[ops.length - 1] : null;
     }
 
     /**
      * Clear the operation for a specific goal (called after successful rollback)
      */
-    clearOperation(goalIndex: number): void {
-        const operations = this.operationsByGoal.get(goalIndex);
-        if (operations && operations.length > 0) {
-            const clearedOperation = operations.pop();
+    clearLastOperationForDocument(document: vscode.TextDocument): void {
+        const key = document.uri.toString();
+        const ops = this.operationsByDoc.get(key);
+        if (ops && ops.length > 0) {
+            const clearedOperation = ops.pop();
             this.outputChannel.appendLine(
-                `Cleared operation ${clearedOperation?.type} for goal ${goalIndex}, remaining: ${operations.length}`
+                `Cleared operation ${clearedOperation?.type} for doc ${key}, remaining: ${ops.length}`
             );
-            
-            // 如果没有剩余操作，删除整个数组
-            if (operations.length === 0) {
-                this.operationsByGoal.delete(goalIndex);
-            }
+            if (ops.length === 0) this.operationsByDoc.delete(key);
         }
+    }
+
+    /**
+     * Update fields of the last operation for this document (used to sync final ranges/text after post-edits)
+     */
+    updateLastOperationForDocument(
+        document: vscode.TextDocument,
+        updater: (op: HistoryOperation) => void
+    ): void {
+        const key = document.uri.toString();
+        const ops = this.operationsByDoc.get(key);
+        if (!ops || ops.length === 0) return;
+        const last = ops[ops.length - 1];
+        updater(last);
     }
 
     /**
      * Check if the current document state matches the recorded operation
      */
-    async validateOperation(document: vscode.TextDocument, goalIndex: number): Promise<boolean> {
-        const operations = this.operationsByGoal.get(goalIndex);
-        if (!operations || operations.length === 0) {
-            return false;
-        }
-        
-        const operation = operations[operations.length - 1]; // Get the latest operation
-
-        // Check if document URI matches
-        if (document.uri.toString() !== operation.documentUri) {
-            return false;
-        }
-
-        try {
-            // Simply check if the by block range is still valid
-            const currentRange = operation.byBlockRange;
-            if (currentRange.start.line >= document.lineCount || currentRange.end.line >= document.lineCount) {
-                return false;
-            }
-            
-            // The operation is valid if the range exists
-            return true;
-            
-        } catch (error) {
-            this.outputChannel.appendLine(`Validation error: ${error}`);
-            return false;
-        }
+    async validateOperationInBlock(document: vscode.TextDocument, blockRange: vscode.Range): Promise<boolean> {
+        // Strict validation: exact insertedText must exist in current block content
+        return this.canRollbackSafelyInBlock(document, blockRange);
     }
 
     /**
+     * @deprecated 已弃用：请改用 Lean RPC `getByBlockRange`。此方法仅为历史保留，不应在生产路径调用。
      * Find the entire by block range containing the cursor position
      */
     async findByBlockRange(document: vscode.TextDocument, position: vscode.Position): Promise<{range: vscode.Range, content: string} | null> {
         const byRegex = /by/;
         const total = document.lineCount;
-        
-        vscode.window.showInformationMessage(`🔍 DEBUG: 搜索by块，从位置 ${position.line}:${position.character}`);
+        // Debug logging to output channel only
+        this.outputChannel.appendLine(`[DEBUG] 搜索by块，从位置 ${position.line}:${position.character}`);
         
         // Search upward for 'by' keyword
         let byStartLine: number | null = null;
         for (let ln = position.line; ln >= Math.max(0, position.line - 50); ln--) {
             const line = document.lineAt(ln);
             if (ln >= position.line - 5 && ln <= position.line) {
-                vscode.window.showInformationMessage(`🔍 第${ln}行: "${line.text}"`);
+                this.outputChannel.appendLine(`[DEBUG] 第${ln}行: ${JSON.stringify(line.text)}`);
             }
             if (byRegex.test(line.text)) {
                 byStartLine = ln;
-                vscode.window.showInformationMessage(`✅ 找到'by'在第${ln}行`);
+                this.outputChannel.appendLine(`[DEBUG] 找到 'by' 在第 ${ln} 行`);
                 break;
             }
         }
         
         if (byStartLine === null) {
-            vscode.window.showInformationMessage(`❌ 没有找到'by'关键字`);
+            this.outputChannel.appendLine(`[DEBUG] 没有找到 'by' 关键字`);
             return null;
         }
         

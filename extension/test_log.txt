@@ -1,0 +1,99 @@
+
+> matheye-proof-builder@1.0.0 test:integration:real
+> npm run compile && MATHEYE_TEST_MODE=1 MATHEYE_USE_REAL_RPC=1 node ./out/test/suite/runTest.js
+
+
+> matheye-proof-builder@1.0.0 compile
+> tsc -p ./
+
+⚠ [2/3] Replayed MathEye
+warning: /Users/sjm/coding/projects/lean-plugin/matheye-proof-builder/MathEye.lean:595:10: unused variable `isSeq`
+note: this linter can be disabled with `set_option linter.unusedVariables false`
+warning: /Users/sjm/coding/projects/lean-plugin/matheye-proof-builder/MathEye.lean:724:38: `Array.get?` has been deprecated: Use `a[i]?` instead.
+warning: /Users/sjm/coding/projects/lean-plugin/matheye-proof-builder/MathEye.lean:991:22: unused variable `params`
+note: this linter can be disabled with `set_option linter.unusedVariables false`
+warning: /Users/sjm/coding/projects/lean-plugin/matheye-proof-builder/MathEye.lean:1115:25: `List.get?` has been deprecated: Use `a[i]?` instead.
+warning: /Users/sjm/coding/projects/lean-plugin/matheye-proof-builder/MathEye.lean:1116:25: `List.get?` has been deprecated: Use `a[i]?` instead.
+warning: /Users/sjm/coding/projects/lean-plugin/matheye-proof-builder/MathEye.lean:1165:16: `Array.get?` has been deprecated: Use `a[i]?` instead.
+warning: /Users/sjm/coding/projects/lean-plugin/matheye-proof-builder/MathEye.lean:1171:27: `Array.get?` has been deprecated: Use `a[i]?` instead.
+warning: /Users/sjm/coding/projects/lean-plugin/matheye-proof-builder/MathEye.lean:1164:11: unused variable `h`
+note: this linter can be disabled with `set_option linter.unusedVariables false`
+Build completed successfully.
+- Resolving version...
+✔ Validated version: 1.103.2
+✔ Found existing install in /Users/sjm/coding/projects/lean-plugin/matheye-proof-builder/extension/.vscode-test/vscode-darwin-1.103.2
+[90m[main 2025-09-06T22:07:16.992Z][0m update#setState disabled
+[90m[main 2025-09-06T22:07:17.016Z][0m update#ctor - updates are disabled by the environment
+Via 'product.json#extensionEnabledApiProposals' extension 'ms-vsliveshare.vsliveshare' wants API proposal 'notebookCellExecutionState' but that proposal DOES NOT EXIST. Likely, the proposal has been finalized (check 'vscode.d.ts') or was abandoned.
+Via 'product.json#extensionEnabledApiProposals' extension 'ms-python.gather' wants API proposal 'notebookCellExecutionState' but that proposal DOES NOT EXIST. Likely, the proposal has been finalized (check 'vscode.d.ts') or was abandoned.
+Via 'product.json#extensionEnabledApiProposals' extension 'ms-python.vscode-pylance' wants API proposal 'mcpConfigurationProvider' but that proposal DOES NOT EXIST. Likely, the proposal has been finalized (check 'vscode.d.ts') or was abandoned.
+Creation of workbench contribution 'workbench.contrib.extensionPoints' took 22ms.
+Creation of workbench contribution 'workbench.contrib.preferencesActions' took 201ms.
+Creation of workbench contribution 'workbench.contrib.registerCellSchemas' took 335ms.
+Creation of workbench contribution 'workbench.contrib.chatResolver' took 49ms.
+Creation of workbench contribution 'workbench.contrib.explorerViewletViews' took 119ms.
+Creation of workbench contribution 'workbench.contrib.remoteStatusIndicator' took 92ms.
+Creation of workbench contribution 'workbench.contrib.textMateTokenizationInstantiator' took 62ms.
+Creation of workbench contribution 'workbench.contrib.chatSetup' took 1075ms.
+Creation of workbench contribution 'workbench.contrib.interactiveDocument' took 71ms.
+Creation of workbench contribution 'workbench.contrib.replDocument' took 24ms.
+Creation of workbench contribution 'workbench.contrib.localHistoryTimeline' took 274ms.
+Creation of workbench contribution 'workbench.contrib.configurationDefaultOverridesContribution' took 21ms.
+Started local extension host with pid 81302.
+Creation of workbench contribution 'workbench.contrib.settingsEditorTitleBarActions' took 118ms.
+Creation of workbench contribution 'workbench.contrib.editorWordWrapContextKeyTracker' took 288ms.
+[LocalProcessExtensionHost]: Extension host did not start in 10 seconds (debugBrk: false)
+Creation of workbench contribution 'notebook.contrib.editorStatus' took 102ms.
+Loading development extension at /Users/sjm/coding/projects/lean-plugin/matheye-proof-builder/extension
+Creation of workbench contribution 'workbench.contrib.chatAgentSetting' took 126ms.
+[0m[0m
+[0m  MathEye Integration[0m
+ChatSessionStore: Migrating 0 chat sessions from storage service to file system
+Creation of workbench contribution 'chat.simpleBrowser.overlay' took 371ms.
+MathEye Proof Builder is now active!
+Extension host (LocalProcess pid: 81302) is unresponsive.
+Extension host (LocalProcess pid: 81302) is responsive.
+Creation of workbench contribution 'inlineChat.enabler' took 105ms.
+22:09:57.200 - child process exited with code 0
+22:09:57.281 - child process exited with code 0
+22:09:57.377 - child process exited with code 0
+22:09:57.620 - child process exited with code 0
+22:09:57.681 - child process exited with code 0
+22:09:57.923 - child process exited with code 0
+22:09:58.418 - child process exited with code 0
+22:09:58.510 - child process exited with code 0
+22:09:58.808 - child process exited with code 0
+22:09:58.861 - [ClientProvider] Creating LeanClient for file:///Users/sjm/coding/projects/lean-plugin/matheye-proof-builder
+22:09:58.895 - [InfoProvider] Adding client for workspace: file:///Users/sjm/coding/projects/lean-plugin/matheye-proof-builder
+22:09:58.895 - [LeanClient] Restarting Lean Server
+22:09:59.017 - child process exited with code 0
+22:09:59.130 - [LeanClient] starting
+Extension host (LocalProcess pid: 81302) is unresponsive.
+22:10:01.119 - [LeanClient] running, started in 2223 ms
+22:10:01.457 - [InfoProvider] got client restarted event
+22:10:01.460 - [InfoProvider] initInfoView!
+Extension host (LocalProcess pid: 81302) is responsive.
+Creation of workbench contribution 'extensions.chat.toolsContribution' took 1828ms.
+Creation of workbench contribution 'mcpDiscovery' took 623ms.
+Creation of workbench contribution 'workbench.mcp.servers.views.contribution' took 595ms.
+Extension host (LocalProcess pid: 81302) is unresponsive.
+  [31m  1) Inline by rfl: admit at rfl position becomes block and compiles (real)[0m
+[92m [0m[32m 0 passing[0m[90m (3m)[0m
+[31m  1 failing[0m
+[0m  1) MathEye Integration
+       Inline by rfl: admit at rfl position becomes block and compiles (real):
+[0m[31m     Error: rfl should be trimmed[0m[90m
+  	at Context.<anonymous> (out/test/suite/suite.js:86:19)
+[0m
+Error: 1 tests failed.
+	at /Users/sjm/coding/projects/lean-plugin/matheye-proof-builder/extension/out/test/suite/index.js:56:70
+	at done (/Users/sjm/coding/projects/lean-plugin/matheye-proof-builder/extension/node_modules/mocha/lib/mocha.js:1030:7)
+[90m[main 2025-09-06T22:12:27.154Z][0m Extension host with pid 81302 exited with code: 0, signal: unknown.
+Exit code:   1
+Failed to run tests TestRunFailedError: Test run failed with code 1
+    at ChildProcess.onProcessClosed (/Users/sjm/coding/projects/lean-plugin/matheye-proof-builder/extension/node_modules/@vscode/test-electron/out/runTest.js:110:24)
+    at ChildProcess.emit (node:events:518:28)
+    at ChildProcess._handle.onexit (node:internal/child_process:293:12) {
+  code: 1,
+  signal: undefined
+}

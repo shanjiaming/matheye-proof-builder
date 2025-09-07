@@ -8,8 +8,8 @@ import { MathEyeRpcInputParams, MathEyeRpcOutputParams } from '../types';
 export class LeanClientService {
     private outputChannel: vscode.OutputChannel;
 
-    constructor() {
-        this.outputChannel = vscode.window.createOutputChannel("MathEye");
+    constructor(outputChannel?: vscode.OutputChannel) {
+        this.outputChannel = outputChannel || vscode.window.createOutputChannel("MathEye");
     }
 
     /**
@@ -143,6 +143,194 @@ export class LeanClientService {
      */
     showOutput(): void {
         this.outputChannel.show();
+    }
+
+    /**
+     * Insert have statement by calling MathEye.insertHaveByAction
+     */
+    async insertHaveByAction(
+        position: vscode.Position,
+        document: vscode.TextDocument,
+        action: 'admit' | 'deny',
+        byRange?: vscode.Range,
+        includeByOnSeq?: boolean,
+        returnWholeFile?: boolean
+    ): Promise<{ success: boolean; newText?: string; range?: vscode.Range; errorMsg?: string }> {
+        const client = await this.getLeanClient();
+        const uri = document.uri.toString();
+        
+        const call = async () => {
+            const sessionId = (await client.sendRequest("$/lean/rpc/connect", { uri })).sessionId;
+            const params: any = {
+                pos: { line: position.line, character: position.character },
+                action: action,
+            };
+            if (byRange) {
+                const rangeDto = {
+                    start: { line: byRange.start.line, character: byRange.start.character },
+                    stop: { line: byRange.end.line, character: byRange.end.character }
+                };
+                (params as any)["blockRange?"] = rangeDto;
+                (params as any)["blockRange"] = rangeDto;
+            }
+            if (includeByOnSeq !== undefined) {
+                (params as any)["includeByOnSeq?"] = includeByOnSeq;
+                (params as any)["includeByOnSeq"] = includeByOnSeq;
+            }
+            if (returnWholeFile !== undefined) {
+                (params as any)["returnWholeFile?"] = returnWholeFile;
+                (params as any)["returnWholeFile"] = returnWholeFile;
+            }
+            const rpcParams = {
+                sessionId,
+                method: "MathEye.insertHaveByAction",
+                params
+            };
+            const result: any = await client.sendRequest("$/lean/rpc/call", rpcParams);
+
+            // Debug logging to a guaranteed-existing directory under out/
+            try {
+                if (process.env.MATHEYE_TEST_MODE === '1') {
+                    const p = require('path'); const fs = require('fs');
+                    const logPath = p.resolve(__dirname, '..', 'rpc_debug.log');
+                    fs.appendFileSync(logPath, `insertHaveByAction @ ${position.line}:${position.character} -> ${JSON.stringify(result)}\n`);
+                }
+            } catch {}
+            
+            if (result && result.success) {
+                const rg = result.range;
+                const range = new vscode.Range(
+                    new vscode.Position(rg.start.line, rg.start.character), 
+                    new vscode.Position(rg.stop.line, rg.stop.character)
+                );
+                return { success: true, newText: result.newText, range };
+            }
+            return { success: false, errorMsg: result?.errorMsg || 'unknown error' };
+        };
+        
+        try {
+            let res = await call();
+            if (!res.success && /closed file/i.test(String(res.errorMsg || ''))) {
+                await this.ensureDocumentVisible(document);
+                res = await call();
+            }
+            return res;
+        } catch (e: any) {
+            if (/closed file/i.test(String(e))) {
+                await this.ensureDocumentVisible(document);
+                try { return await call(); } catch {}
+            }
+            return { success: false, errorMsg: String(e) };
+        }
+    }
+
+    /**
+     * Get by block range using MathEye.getByBlockRange
+     */
+    async getByBlockRange(
+        position: vscode.Position, 
+        document: vscode.TextDocument
+    ): Promise<{success: boolean, range?: vscode.Range, isTacticContext?: boolean, isTermContext?: boolean, isMatchAlt?: boolean, syntaxKind?: string, errorMsg?: string}> {
+        const client = await this.getLeanClient();
+        const uri = document.uri.toString();
+        
+        try {
+            const sessionId = (await client.sendRequest("$/lean/rpc/connect", { uri })).sessionId;
+            const rpcParams = {
+                sessionId,
+                method: "MathEye.getByBlockRange", 
+                params: {
+                    pos: { line: position.line, character: position.character }
+                }
+            };
+            const result: any = await client.sendRequest("$/lean/rpc/call", rpcParams);
+            
+            if (result && result.success) {
+                const rg = result.range;
+                const range = new vscode.Range(
+                    new vscode.Position(rg.start.line, rg.start.character),
+                    new vscode.Position(rg.stop.line, rg.stop.character)
+                );
+                return { 
+                    success: true, 
+                    range, 
+                    isTacticContext: result.isTacticContext,
+                    isTermContext: result.isTermContext,
+                    isMatchAlt: result.isMatchAlt,
+                    syntaxKind: result.syntaxKind
+                };
+            }
+            return { success: false, errorMsg: result?.errorMsg || 'unknown error' };
+        } catch (e: any) {
+            return { success: false, errorMsg: String(e) };
+        }
+    }
+
+    /**
+     * Ensure document is visible to Lean server
+     */
+    private async ensureDocumentVisible(document: vscode.TextDocument): Promise<void> {
+        // Simple implementation: just wait a bit
+        await new Promise(r => setTimeout(r, 200));
+    }
+
+    /**
+     * Capture anchor for position tracking
+     */
+    async captureAnchor(
+        position: vscode.Position, 
+        document: vscode.TextDocument
+    ): Promise<any> {
+        const client = await this.getLeanClient();
+        const uri = document.uri.toString();
+        
+        try {
+            const sessionId = (await client.sendRequest("$/lean/rpc/connect", { uri })).sessionId;
+            const rpcParams = {
+                sessionId,
+                method: "MathEye.captureAnchor",
+                params: {
+                    pos: { line: position.line, character: position.character }
+                }
+            };
+            const result: any = await client.sendRequest("$/lean/rpc/call", rpcParams);
+            return result;
+        } catch (e: any) {
+            return { success: false, errorMsg: String(e) };
+        }
+    }
+
+    /**
+     * Restore position from anchor
+     */
+    async restoreByAnchor(
+        document: vscode.TextDocument,
+        anchor: any
+    ): Promise<{success: boolean, position?: vscode.Position, newText?: string, range?: vscode.Range, errorMsg?: string}> {
+        const client = await this.getLeanClient();
+        const uri = document.uri.toString();
+        
+        try {
+            const sessionId = (await client.sendRequest("$/lean/rpc/connect", { uri })).sessionId;
+            const rpcParams = {
+                sessionId,
+                method: "MathEye.restoreByAnchor",
+                params: anchor
+            };
+            const result: any = await client.sendRequest("$/lean/rpc/call", rpcParams);
+            
+            if (result && result.success) {
+                const position = result.pos ? new vscode.Position(result.pos.line, result.pos.character) : undefined;
+                const range = result.range ? new vscode.Range(
+                    new vscode.Position(result.range.start.line, result.range.start.character),
+                    new vscode.Position(result.range.stop.line, result.range.stop.character)
+                ) : undefined;
+                return { success: true, position, newText: result.newText, range };
+            }
+            return { success: false, errorMsg: result?.errorMsg || 'unknown error' };
+        } catch (e: any) {
+            return { success: false, errorMsg: String(e) };
+        }
     }
 
     dispose(): void {

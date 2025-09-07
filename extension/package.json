@@ -18,11 +18,15 @@
     "interactive",
     "low-code"
   ],
-  "activationEvents": [
-    "onLanguage:lean4",
-    "onCommand:matheye.startProofBuilder",
-    "onCommand:matheye.analyzeProofGoals"
-  ],
+    "activationEvents": [
+      "onStartupFinished",
+      "onLanguage:lean4",
+      "onCommand:matheye.startProofBuilder",
+      "onCommand:matheye.insertHaveAdmit",
+      "onCommand:matheye.insertHaveDeny",
+      "onCommand:matheye.insertHaveSnippet",
+      "onCommand:matheye.analyzeProofGoals"
+    ],
   "main": "./out/extension.js",
   "contributes": {
     "configuration": {
@@ -80,6 +84,12 @@
           "minimum": 1000,
           "maximum": 120000,
           "description": "Timeout for OpenAI API requests in milliseconds."
+        },
+        "matheye.fullFileReplace": {
+          "type": "boolean",
+          "default": false,
+          "deprecationMessage": "Deprecated: 总是整篇替换，客户端不再读取此配置。",
+          "description": "[Deprecated] Always full-file replace; this setting is ignored."
         }
       }
     },
@@ -87,6 +97,31 @@
       {
         "command": "matheye.startProofBuilder",
         "title": "Start Proof Builder",
+        "category": "MathEye"
+      },
+      {
+        "command": "matheye.insertHaveSnippet",
+        "title": "Insert Have Snippet (AST)",
+        "category": "MathEye"
+      },
+      {
+        "command": "matheye.insertHaveAdmit",
+        "title": "Insert Have (Admit)",
+        "category": "MathEye"
+      },
+      {
+        "command": "matheye.insertHaveDeny",
+        "title": "Insert Have (Deny)",
+        "category": "MathEye"
+      },
+      {
+        "command": "matheye.insertHaveAdmitWithHistory",
+        "title": "[Test] Insert Admit (Record History)",
+        "category": "MathEye"
+      },
+      {
+        "command": "matheye.rollbackCurrentBlock",
+        "title": "[Test] Rollback Current By Block",
         "category": "MathEye"
       },
       {
@@ -101,6 +136,26 @@
           "command": "matheye.startProofBuilder",
           "when": "editorLangId == lean4"
         },
+        {
+          "command": "matheye.insertHaveSnippet",
+          "when": "editorLangId == lean4"
+        },
+        {
+          "command": "matheye.insertHaveAdmit",
+          "when": "editorLangId == lean4"
+        },
+          {
+            "command": "matheye.insertHaveDeny",
+            "when": "editorLangId == lean4"
+          },
+          {
+            "command": "matheye.insertHaveAdmitWithHistory",
+            "when": "editorLangId == lean4"
+          },
+          {
+            "command": "matheye.rollbackCurrentBlock",
+            "when": "editorLangId == lean4"
+          },
         {
           "command": "matheye.analyzeProofGoals",
           "when": "editorLangId == lean4"
@@ -119,7 +174,11 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "test": "npm run compile && mocha --recursive ./out/test/**/*.js"
+    "test": "npm run test:unit",
+    "test:unit": "npm run compile && node ./node_modules/mocha/bin/mocha.js ./out/test/leanClient.unit.spec.js --reporter spec --exit && node ./node_modules/mocha/bin/mocha.js ./out/test/codeModifier.unit.spec.js --reporter spec --exit && node ./node_modules/mocha/bin/mocha.js ./out/test/historyManager.unit.spec.js --reporter spec --exit && node ./node_modules/mocha/bin/mocha.js ./out/test/leanClient.rpc.unit.spec.js --reporter spec --exit",
+    "test:integration": "npm run compile && node ./out/test/suite/runTest.js",
+    "test:integration:real": "npm run compile && MATHEYE_TEST_MODE=1 MATHEYE_USE_REAL_RPC=1 node ./out/test/suite/runTest.js",
+    "test:integration:tactic": "npm run compile && MATHEYE_TEST_MODE=1 MATHEYE_USE_REAL_RPC=1 MATHEYE_ONLY_COMPLEX=1 node ./out/test/suite/runTest.js"
   },
   "dependencies": {
     "@types/node": "^18.x",
@@ -135,6 +194,7 @@
     "chai": "^5.3.1",
     "mocha": "^11.7.1",
     "mock-require": "^3.0.3",
+    "@vscode/test-electron": "^2.4.0",
     "typescript": "^5.0.0"
   },
   "extensionDependencies": [

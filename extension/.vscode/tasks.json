@@ -1,0 +1,12 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "preLaunch",
+      "type": "shell",
+      "command": "bash",
+      "args": ["-lc", "cd \"${workspaceFolder}/..\" && lake build MathEye || true; cd \"${workspaceFolder}\" && npm run compile || true"],
+      "problemMatcher": []
+    }
+  ]
+}

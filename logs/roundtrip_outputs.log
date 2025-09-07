@@ -1,0 +1,1466 @@
+Round-Trip Outputs Log
+================================================================================
+
+File: complex_proofs.lean | Mode: newline
+--------------------------------------------------------------------------------
+def my_length {α : Type} : List α → Nat
+  | [] => 0
+  | _ :: xs => 1 + my_length xs
+
+theorem length_zero_empty {α : Type} : my_length ([] : List α) = 0 :=
+  by simp [my_length]
+
+theorem length_singleton {α : Type} (x : α) : my_length [x] = 1 :=
+  by simp [my_length]
+
+File: complex_proofs.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+def my_length {α : Type} : List α → Nat
+  | [] => 0
+  | _ :: xs => 1 + my_length xs
+
+theorem length_zero_empty {α : Type} : my_length ([] : List α) = 0 :=
+  by simp [my_length]
+
+theorem length_singleton {α : Type} (x : α) : my_length [x] = 1 :=
+  by simp [my_length]
+
+File: inductive_types.lean | Mode: newline
+--------------------------------------------------------------------------------
+inductive MyNat where
+  | zero : MyNat
+  | succ : MyNat → MyNat
+
+def add : MyNat → MyNat → MyNat
+  | MyNat.zero, n => n
+  | MyNat.succ m, n => MyNat.succ (add m n)
+
+theorem add_zero (n : MyNat) : add n MyNat.zero = n :=
+  by cases n with
+  | zero => rfl
+  | succ m => simp [add, add_zero m]
+
+theorem add_succ (m n : MyNat) : add m (MyNat.succ n) = MyNat.succ (add m n) :=
+  by cases m with
+  | zero => rfl
+  | succ k => simp [add, add_succ k n]
+
+File: inductive_types.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+inductive MyNat where
+  | zero : MyNat
+  | succ : MyNat → MyNat
+
+def add : MyNat → MyNat → MyNat
+  | MyNat.zero, n => n
+  | MyNat.succ m, n => MyNat.succ (add m n)
+
+theorem add_zero (n : MyNat) : add n MyNat.zero = n :=
+  by cases n with
+  | zero => rfl
+  | succ m => simp [add, add_zero m]
+
+theorem add_succ (m n : MyNat) : add m (MyNat.succ n) = MyNat.succ (add m n) :=
+  by cases m with
+  | zero => rfl
+  | succ k => simp [add, add_succ k n]
+
+File: let_test.lean | Mode: newline
+--------------------------------------------------------------------------------
+def test_let (n : Nat) : Nat :=
+  let a := n + 1
+  let b := a * 2  
+  let c := b - n
+  c
+
+File: let_test.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+def test_let (n : Nat) : Nat :=
+  let a := n + 1
+  let b := a * 2  
+  let c := b - n
+  c
+
+File: simple_tactic.lean | Mode: newline
+--------------------------------------------------------------------------------
+theorem simple_tactic_test (P Q R : Prop) : (P → Q) → (Q → R) → (P → R) :=
+  by intro hpq hqr hp
+     have hq : Q := hpq hp
+     exact hqr hq
+
+File: simple_tactic.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+theorem simple_tactic_test (P Q R : Prop) : (P → Q) → (Q → R) → (P → R) :=
+  by intro hpq hqr hp
+     have hq : Q := hpq hp
+     exact hqr hq
+
+File: struct_test.lean | Mode: newline
+--------------------------------------------------------------------------------
+structure Point where
+  x : Nat
+  y : Nat
+
+File: struct_test.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+structure Point where
+  x : Nat
+  y : Nat
+
+File: tactic_combinations.lean | Mode: newline
+--------------------------------------------------------------------------------
+theorem tactic_combo_test (P Q : Prop) : P → Q → P :=
+  by intro hp hq
+     exact hp
+
+theorem cases_test (n : Nat) : n = n :=
+  by cases n with
+  | zero => rfl
+  | succ m => rfl
+
+def simple_double (n : Nat) : Nat :=
+  match n with
+  | 0 => 0
+  | Nat.succ m => Nat.succ (Nat.succ (simple_double m))
+
+theorem double_zero : simple_double 0 = 0 :=
+  by simp [simple_double]
+
+File: tactic_combinations.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+theorem tactic_combo_test (P Q : Prop) : P → Q → P :=
+  by intro hp hq
+     exact hp
+
+theorem cases_test (n : Nat) : n = n :=
+  by cases n with
+  | zero => rfl
+  | succ m => rfl
+
+def simple_double (n : Nat) : Nat :=
+  match n with
+  | 0 => 0
+  | Nat.succ m => Nat.succ (Nat.succ (simple_double m))
+
+theorem double_zero : simple_double 0 = 0 :=
+  by simp [simple_double]
+
+File: test_01_basic_theorem.lean | Mode: newline
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Basic theorem about natural numbers -/
+theorem add_zero (n : Nat) : n + 0 = n := by
+  induction n with
+  | zero => rfl
+  | succ k ih => rw [Nat.add_succ, ih]
+
+/-- Double of a number -/
+theorem double_eq_add_self (n : Nat) : 2 * n = n + n := by
+  rw [Nat.two_mul]
+
+File: test_01_basic_theorem.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Basic theorem about natural numbers -/
+theorem add_zero (n : Nat) : n + 0 = n := by
+  induction n with
+  | zero => rfl
+  | succ k ih => rw [Nat.add_succ, ih]
+
+/-- Double of a number -/
+theorem double_eq_add_self (n : Nat) : 2 * n = n + n := by
+  rw [Nat.two_mul]
+
+File: test_01_fixed.lean | Mode: newline
+--------------------------------------------------------------------------------
+theorem add_zero (n : Nat) : n + 0 = n := by
+  induction n with
+  | zero => rfl
+  | succ k ih => rw [Nat.add_succ, ih]
+
+-- Double of a number
+
+theorem double_eq_add_self (n : Nat) : 2 * n = n + n := by
+  rw [Nat.two_mul]
+
+File: test_01_fixed.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+theorem add_zero (n : Nat) : n + 0 = n := by
+  induction n with
+  | zero => rfl
+  | succ k ih => rw [Nat.add_succ, ih]
+
+-- Double of a number
+
+theorem double_eq_add_self (n : Nat) : 2 * n = n + n := by
+  rw [Nat.two_mul]
+
+File: test_02_simp_proofs.lean | Mode: newline
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+import Mathlib.Data.List.Basic
+
+/-- Using simp for arithmetic simplification -/
+theorem zero_add_eq_zero (n : Nat) : 0 + n = n := by
+  simp
+
+/-- Using simp for equality -/
+theorem succ_eq_add_one (n : Nat) : Nat.succ n = n + 1 := by
+  simp
+
+/-- Using simp for list operations -/
+theorem list_length_cons (α : Type) (x : α) (xs : List α) : (x :: xs).length = xs.length + 1 := by
+  simp [List.length_cons]
+
+/-- Using simp for option operations -/
+theorem option_some_getD (α : Type) (x y : α) : (some x).getD y = x := by
+  simp
+
+File: test_02_simp_proofs.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+import Mathlib.Data.List.Basic
+
+/-- Using simp for arithmetic simplification -/
+theorem zero_add_eq_zero (n : Nat) : 0 + n = n := by
+  simp
+
+/-- Using simp for equality -/
+theorem succ_eq_add_one (n : Nat) : Nat.succ n = n + 1 := by
+  simp
+
+/-- Using simp for list operations -/
+theorem list_length_cons (α : Type) (x : α) (xs : List α) : (x :: xs).length = xs.length + 1 := by
+  simp [List.length_cons]
+
+/-- Using simp for option operations -/
+theorem option_some_getD (α : Type) (x y : α) : (some x).getD y = x := by
+  simp
+
+File: test_03_cases_proofs.lean | Mode: newline
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Using cases on natural numbers -/
+theorem cases_on_nat (n : Nat) : n = 0 ∨ ∃ k, n = Nat.succ k := by
+  cases n with
+  | zero => left; rfl
+  | succ k => right; exists k
+
+/-- Using cases on option type -/
+theorem cases_on_option (α : Type) (x : Option α) : x = none ∨ ∃ y, x = some y := by
+  cases x with
+  | none => left; rfl
+  | some y => right; exists y
+
+/-- Using cases with inductive types -/
+inductive EvenOdd : Nat → Prop
+  | even_zero : EvenOdd 0
+  | even_succ : ∀ n, EvenOdd n → EvenOdd (n + 2)
+  | odd_one : EvenOdd 1
+  | odd_succ : ∀ n, EvenOdd n → EvenOdd (n + 2)
+
+theorem cases_on_even_odd (n : Nat) (h : EvenOdd n) : n = 0 ∨ n = 1 ∨ ∃ m, n = m + 2 := by
+  cases h with
+  | even_zero => left; exact rfl
+  | even_succ m hm => right; right; exists m
+  | odd_one => right; left; exact rfl
+  | odd_succ m hm => right; right; exists m
+
+File: test_03_cases_proofs.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Using cases on natural numbers -/
+theorem cases_on_nat (n : Nat) : n = 0 ∨ ∃ k, n = Nat.succ k := by
+  cases n with
+  | zero => left; rfl
+  | succ k => right; exists k
+
+/-- Using cases on option type -/
+theorem cases_on_option (α : Type) (x : Option α) : x = none ∨ ∃ y, x = some y := by
+  cases x with
+  | none => left; rfl
+  | some y => right; exists y
+
+/-- Using cases with inductive types -/
+inductive EvenOdd : Nat → Prop
+  | even_zero : EvenOdd 0
+  | even_succ : ∀ n, EvenOdd n → EvenOdd (n + 2)
+  | odd_one : EvenOdd 1
+  | odd_succ : ∀ n, EvenOdd n → EvenOdd (n + 2)
+
+theorem cases_on_even_odd (n : Nat) (h : EvenOdd n) : n = 0 ∨ n = 1 ∨ ∃ m, n = m + 2 := by
+  cases h with
+  | even_zero => left; exact rfl
+  | even_succ m hm => right; right; exists m
+  | odd_one => right; left; exact rfl
+  | odd_succ m hm => right; right; exists m
+
+File: test_04_induction_proofs.lean | Mode: newline
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Simple induction on natural numbers -/
+theorem nat_induction_simple (n : Nat) : 0 + n = n := by
+  induction n with
+  | zero => rfl
+  | succ k ih => rw [Nat.add_succ, ih]
+
+/-- Induction with successor -/
+theorem succ_add_one (n : Nat) : Nat.succ n = n + 1 := by
+  induction n with
+  | zero => rfl
+  | succ k ih => rw [Nat.add_succ, ih]
+
+/-- Induction on lists -/
+theorem list_length_cons (α : Type) (x : α) (xs : List α) : (x :: xs).length = xs.length + 1 := by
+  induction xs with
+  | nil => simp
+  | cons y ys ih => simp [ih]
+
+/-- Every natural number has a successor -/
+theorem succ_positive (n : Nat) : n < Nat.succ n := by
+  induction n with
+  | zero => simp
+  | succ k ih => simp [ih, Nat.lt_succ_self]
+
+File: test_04_induction_proofs.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Simple induction on natural numbers -/
+theorem nat_induction_simple (n : Nat) : 0 + n = n := by
+  induction n with
+  | zero => rfl
+  | succ k ih => rw [Nat.add_succ, ih]
+
+/-- Induction with successor -/
+theorem succ_add_one (n : Nat) : Nat.succ n = n + 1 := by
+  induction n with
+  | zero => rfl
+  | succ k ih => rw [Nat.add_succ, ih]
+
+/-- Induction on lists -/
+theorem list_length_cons (α : Type) (x : α) (xs : List α) : (x :: xs).length = xs.length + 1 := by
+  induction xs with
+  | nil => simp
+  | cons y ys ih => simp [ih]
+
+/-- Every natural number has a successor -/
+theorem succ_positive (n : Nat) : n < Nat.succ n := by
+  induction n with
+  | zero => simp
+  | succ k ih => simp [ih, Nat.lt_succ_self]
+
+File: test_05_have_exact_proofs.lean | Mode: newline
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Using have and exact for simple steps -/
+theorem have_exact_simple (n : Nat) : n = n := by
+  have h : n = n := rfl
+  exact h
+
+/-- Using have with natural numbers -/
+theorem have_nat_example (n : Nat) : 0 + n = n := by
+  have h : 0 + n = n := Nat.zero_add n
+  exact h
+
+/-- Using have with successor -/
+theorem have_succ_example (n : Nat) : Nat.succ n = n + 1 := by
+  have h : Nat.succ n = n + 1 := rfl
+  exact h
+
+/-- Using have with implication -/
+theorem have_imp_example (P Q : Prop) : P → (Q → P) := by
+  intro hp
+  intro hq
+  have h : P := hp
+  exact h
+
+/-- Using have with conjunction -/
+theorem have_and_example (P Q : Prop) : P ∧ Q → P := by
+  intro h
+  have hp : P := h.left
+  exact hp
+
+File: test_05_have_exact_proofs.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Using have and exact for simple steps -/
+theorem have_exact_simple (n : Nat) : n = n := by
+  have h : n = n := rfl
+  exact h
+
+/-- Using have with natural numbers -/
+theorem have_nat_example (n : Nat) : 0 + n = n := by
+  have h : 0 + n = n := Nat.zero_add n
+  exact h
+
+/-- Using have with successor -/
+theorem have_succ_example (n : Nat) : Nat.succ n = n + 1 := by
+  have h : Nat.succ n = n + 1 := rfl
+  exact h
+
+/-- Using have with implication -/
+theorem have_imp_example (P Q : Prop) : P → (Q → P) := by
+  intro hp
+  intro hq
+  have h : P := hp
+  exact h
+
+/-- Using have with conjunction -/
+theorem have_and_example (P Q : Prop) : P ∧ Q → P := by
+  intro h
+  have hp : P := h.left
+  exact hp
+
+File: test_06_rewrite_proofs.lean | Mode: newline
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Simple rewrite with addition -/
+theorem rewrite_add_zero (n : Nat) : n + 0 = n := by
+  rw [Nat.add_zero]
+
+/-- Rewrite with successor -/
+theorem rewrite_succ (n : Nat) : Nat.succ n = n + 1 := by
+  rw [Nat.succ_eq_add_one]
+
+/-- Multiple rewrites -/
+theorem rewrite_multiple (n m : Nat) : (n + m) + 0 = n + m := by
+  rw [Nat.add_zero]
+
+/-- Rewrite in hypothesis -/
+theorem rewrite_hypothesis (n m : Nat) : n + m = m + n → m + n = n + m := by
+  intro h
+  rw [h]
+
+/-- Rewrite with left arrow -/
+theorem rewrite_left (n : Nat) : n + 0 = n := by
+  rw [← Nat.add_zero n]
+
+/-- Rewrite with commutativity -/
+theorem rewrite_comm (n m : Nat) : n + m = m + n := by
+  rw [Nat.add_comm]
+
+/-- Rewrite in complex expression -/
+theorem rewrite_complex (n m k : Nat) : n + (m + k) = (n + m) + k := by
+  rw [Nat.add_assoc]
+
+/-- Rewrite with pattern -/
+theorem rewrite_pattern (n : Nat) : 2 * n = n + n := by
+  rw [Nat.two_mul]
+
+File: test_06_rewrite_proofs.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Simple rewrite with addition -/
+theorem rewrite_add_zero (n : Nat) : n + 0 = n := by
+  rw [Nat.add_zero]
+
+/-- Rewrite with successor -/
+theorem rewrite_succ (n : Nat) : Nat.succ n = n + 1 := by
+  rw [Nat.succ_eq_add_one]
+
+/-- Multiple rewrites -/
+theorem rewrite_multiple (n m : Nat) : (n + m) + 0 = n + m := by
+  rw [Nat.add_zero]
+
+/-- Rewrite in hypothesis -/
+theorem rewrite_hypothesis (n m : Nat) : n + m = m + n → m + n = n + m := by
+  intro h
+  rw [h]
+
+/-- Rewrite with left arrow -/
+theorem rewrite_left (n : Nat) : n + 0 = n := by
+  rw [← Nat.add_zero n]
+
+/-- Rewrite with commutativity -/
+theorem rewrite_comm (n m : Nat) : n + m = m + n := by
+  rw [Nat.add_comm]
+
+/-- Rewrite in complex expression -/
+theorem rewrite_complex (n m k : Nat) : n + (m + k) = (n + m) + k := by
+  rw [Nat.add_assoc]
+
+/-- Rewrite with pattern -/
+theorem rewrite_pattern (n : Nat) : 2 * n = n + n := by
+  rw [Nat.two_mul]
+
+File: test_07_def_recursive.lean | Mode: newline
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Simple recursive function definition -/
+def factorial : Nat → Nat
+  | 0 => 1
+  | Nat.succ n => Nat.succ n * factorial n
+
+/-- Recursive function with pattern matching -/
+def fibonacci : Nat → Nat
+  | 0 => 0
+  | 1 => 1
+  | Nat.succ (Nat.succ n) => fibonacci n + fibonacci (Nat.succ n)
+
+/-- Non-recursive definition -/
+def double (n : Nat) : Nat := 2 * n
+
+/-- Definition with multiple arguments -/
+def add_three (a b c : Nat) : Nat := a + b + c
+
+/-- Recursive function on lists -/
+def list_sum {α : Type} [Add α] [Zero α] : List α → α
+  | [] => 0
+  | x :: xs => x + list_sum xs
+
+/-- Definition with let binding -/
+def complicated_calc (n : Nat) : Nat :=
+  let a := n + 1
+  let b := a * 2
+  let c := b - n
+  c
+
+/-- Simple recursive definition -/
+def simple_length {α : Type} : List α → Nat
+  | [] => 0
+  | _ :: xs => 1 + simple_length xs
+
+/-- Definition with type parameters -/
+def identity {α : Type} (x : α) : α := x
+
+/-- Recursive function with accumulator -/
+def sum_range : Nat → Nat → Nat
+  | 0, acc => acc
+  | Nat.succ n, acc => sum_range n (acc + Nat.succ n)
+
+File: test_07_def_recursive.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Simple recursive function definition -/
+def factorial : Nat → Nat
+  | 0 => 1
+  | Nat.succ n => Nat.succ n * factorial n
+
+/-- Recursive function with pattern matching -/
+def fibonacci : Nat → Nat
+  | 0 => 0
+  | 1 => 1
+  | Nat.succ (Nat.succ n) => fibonacci n + fibonacci (Nat.succ n)
+
+/-- Non-recursive definition -/
+def double (n : Nat) : Nat := 2 * n
+
+/-- Definition with multiple arguments -/
+def add_three (a b c : Nat) : Nat := a + b + c
+
+/-- Recursive function on lists -/
+def list_sum {α : Type} [Add α] [Zero α] : List α → α
+  | [] => 0
+  | x :: xs => x + list_sum xs
+
+/-- Definition with let binding -/
+def complicated_calc (n : Nat) : Nat :=
+  let a := n + 1
+  let b := a * 2
+  let c := b - n
+  c
+
+/-- Simple recursive definition -/
+def simple_length {α : Type} : List α → Nat
+  | [] => 0
+  | _ :: xs => 1 + simple_length xs
+
+/-- Definition with type parameters -/
+def identity {α : Type} (x : α) : α := x
+
+/-- Recursive function with accumulator -/
+def sum_range : Nat → Nat → Nat
+  | 0, acc => acc
+  | Nat.succ n, acc => sum_range n (acc + Nat.succ n)
+
+File: test_08_inductive_types.lean | Mode: newline
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Simple inductive type -/
+inductive Bool' : Type
+  | true
+  | false
+
+/-- Inductive type with parameters -/
+inductive Option' (α : Type) : Type
+  | none
+  | some (val : α)
+
+/-- Inductive type with recursion -/
+inductive Nat' : Type
+  | zero
+  | succ (n : Nat')
+
+/-- Inductive type for expressions -/
+inductive Expr : Type
+  | const (n : Nat)
+  | var (name : String)
+  | add (left right : Expr)
+  | mul (left right : Expr)
+
+/-- Inductive type with indices -/
+inductive MyVector (α : Type) : Nat → Type
+  | nil : MyVector α 0
+  | cons (head : α) (tail : MyVector α n) : MyVector α (Nat.succ n)
+
+/-- Inductive proposition -/
+inductive Even : Nat → Prop
+  | even_zero : Even 0
+  | even_succ : ∀ n, Even n → Even (n + 2)
+
+/-- Inductive proposition with multiple constructors -/
+inductive Prime : Nat → Prop
+  | prime_2 : Prime 2
+  | prime_3 : Prime 3
+  | prime_odd : ∀ n, n > 1 → (∀ d, d > 1 → d < n → ¬ (d ∣ n)) → Prime n
+
+/-- Inductive type for binary trees -/
+inductive Tree (α : Type) : Type
+  | empty
+  | node (value : α) (left right : Tree α)
+
+/-- Inductive type with dependent types -/
+inductive MyFin : Nat → Type
+  | fz : MyFin (Nat.succ n)
+  | fs : MyFin n → MyFin (Nat.succ n)
+
+File: test_08_inductive_types.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Simple inductive type -/
+inductive Bool' : Type
+  | true
+  | false
+
+/-- Inductive type with parameters -/
+inductive Option' (α : Type) : Type
+  | none
+  | some (val : α)
+
+/-- Inductive type with recursion -/
+inductive Nat' : Type
+  | zero
+  | succ (n : Nat')
+
+/-- Inductive type for expressions -/
+inductive Expr : Type
+  | const (n : Nat)
+  | var (name : String)
+  | add (left right : Expr)
+  | mul (left right : Expr)
+
+/-- Inductive type with indices -/
+inductive MyVector (α : Type) : Nat → Type
+  | nil : MyVector α 0
+  | cons (head : α) (tail : MyVector α n) : MyVector α (Nat.succ n)
+
+/-- Inductive proposition -/
+inductive Even : Nat → Prop
+  | even_zero : Even 0
+  | even_succ : ∀ n, Even n → Even (n + 2)
+
+/-- Inductive proposition with multiple constructors -/
+inductive Prime : Nat → Prop
+  | prime_2 : Prime 2
+  | prime_3 : Prime 3
+  | prime_odd : ∀ n, n > 1 → (∀ d, d > 1 → d < n → ¬ (d ∣ n)) → Prime n
+
+/-- Inductive type for binary trees -/
+inductive Tree (α : Type) : Type
+  | empty
+  | node (value : α) (left right : Tree α)
+
+/-- Inductive type with dependent types -/
+inductive MyFin : Nat → Type
+  | fz : MyFin (Nat.succ n)
+  | fs : MyFin n → MyFin (Nat.succ n)
+
+File: test_09_structures.lean | Mode: newline
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Simple structure -/
+structure Point where
+  x : Nat
+  y : Nat
+
+/-- Structure with type parameters -/
+structure Pair (α β : Type) where
+  first : α
+  second : β
+
+/-- Structure with inheritance -/
+structure Point3D extends Point where
+  z : Nat
+
+/-- Simple structure with properties -/
+structure SimpleMonoid (α : Type) where
+  mul : α → α → α
+  one : α
+
+/-- Simple structure with default values -/
+structure SimpleConfig where
+  timeout : Nat := 30
+  retries : Nat := 3
+  debug : Bool := false
+
+/-- Simple structure with computed fields -/
+structure SimpleRectangle where
+  width : Nat
+  height : Nat
+  area : Nat := width * height
+
+/-- Simple structure with proofs -/
+structure SimpleIsEven (n : Nat) where
+  witness : ∃ k, n = 2 * k
+
+/-- Simple structure with functions -/
+structure SimpleEither (α β : Type) where
+  mkLeft : α → SimpleEither α β
+  mkRight : β → SimpleEither α β
+
+File: test_09_structures.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Simple structure -/
+structure Point where
+  x : Nat
+  y : Nat
+
+/-- Structure with type parameters -/
+structure Pair (α β : Type) where
+  first : α
+  second : β
+
+/-- Structure with inheritance -/
+structure Point3D extends Point where
+  z : Nat
+
+/-- Simple structure with properties -/
+structure SimpleMonoid (α : Type) where
+  mul : α → α → α
+  one : α
+
+/-- Simple structure with default values -/
+structure SimpleConfig where
+  timeout : Nat := 30
+  retries : Nat := 3
+  debug : Bool := false
+
+/-- Simple structure with computed fields -/
+structure SimpleRectangle where
+  width : Nat
+  height : Nat
+  area : Nat := width * height
+
+/-- Simple structure with proofs -/
+structure SimpleIsEven (n : Nat) where
+  witness : ∃ k, n = 2 * k
+
+/-- Simple structure with functions -/
+structure SimpleEither (α β : Type) where
+  mkLeft : α → SimpleEither α β
+  mkRight : β → SimpleEither α β
+
+File: test_10_namespace_section.lean | Mode: newline
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Simple definitions without namespace -/
+def my_add (n m : Nat) : Nat := n + m
+
+def my_mul (n m : Nat) : Nat := n * m
+
+/-- Theorem using defined functions -/
+theorem my_add_comm (n m : Nat) : my_add n m = my_add m n := by
+  unfold my_add
+  rw [Nat.add_comm]
+
+/-- Simple list operations -/
+def my_sum_list : List Nat → Nat
+  | [] => 0
+  | x :: xs => x + my_sum_list xs
+
+/-- Theorem about sum -/
+theorem sum_list_zero : my_sum_list [] = 0 := rfl
+
+/-- Simple notation example -/
+def double_nat (x : Nat) : Nat := 2 * x
+
+/-- Private definition example -/
+private def secret_helper (n : Nat) : Nat := n + 42
+
+def public_using_private (n : Nat) : Nat := secret_helper n - 42
+
+/-- Theorem using private definition -/
+theorem public_correct (n : Nat) : public_using_private n = n := by
+  unfold public_using_private secret_helper
+  rw [Nat.add_sub_cancel]
+
+File: test_10_namespace_section.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Simple definitions without namespace -/
+def my_add (n m : Nat) : Nat := n + m
+
+def my_mul (n m : Nat) : Nat := n * m
+
+/-- Theorem using defined functions -/
+theorem my_add_comm (n m : Nat) : my_add n m = my_add m n := by
+  unfold my_add
+  rw [Nat.add_comm]
+
+/-- Simple list operations -/
+def my_sum_list : List Nat → Nat
+  | [] => 0
+  | x :: xs => x + my_sum_list xs
+
+/-- Theorem about sum -/
+theorem sum_list_zero : my_sum_list [] = 0 := rfl
+
+/-- Simple notation example -/
+def double_nat (x : Nat) : Nat := 2 * x
+
+/-- Private definition example -/
+private def secret_helper (n : Nat) : Nat := n + 42
+
+def public_using_private (n : Nat) : Nat := secret_helper n - 42
+
+/-- Theorem using private definition -/
+theorem public_correct (n : Nat) : public_using_private n = n := by
+  unfold public_using_private secret_helper
+  rw [Nat.add_sub_cancel]
+
+File: test_11_math_proofs.lean | Mode: newline
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Basic arithmetic properties -/
+theorem mul_zero (n : Nat) : n * 0 = 0 := by
+  induction n with
+  | zero => rfl
+  | succ k ih => rw [Nat.succ_mul, ih, Nat.add_zero]
+
+/-- Properties of successor -/
+theorem succ_inj (n m : Nat) : Nat.succ n = Nat.succ m → n = m := by
+  intro h
+  injection h
+
+/-- Simple addition property -/
+theorem add_zero_right (n : Nat) : n + 0 = n := by
+  rfl
+
+/-- Simple properties -/
+theorem add_succ_eq_succ_add (n m : Nat) : Nat.succ n + m = n + Nat.succ m := by
+  rw [Nat.succ_add, Nat.add_succ]
+
+/-- Properties of lists -/
+theorem list_length_ge_zero (α : Type) (xs : List α) : xs.length ≥ 0 := by
+  cases xs with
+  | nil => simp
+  | cons y ys => simp [Nat.zero_le]
+
+/-- Properties of options -/
+theorem option_some_eq_some (α : Type) (x y : α) : some x = some y ↔ x = y := by
+  constructor
+  · intro h
+    injection h
+  · intro h
+    rw [h]
+
+File: test_11_math_proofs.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Basic arithmetic properties -/
+theorem mul_zero (n : Nat) : n * 0 = 0 := by
+  induction n with
+  | zero => rfl
+  | succ k ih => rw [Nat.succ_mul, ih, Nat.add_zero]
+
+/-- Properties of successor -/
+theorem succ_inj (n m : Nat) : Nat.succ n = Nat.succ m → n = m := by
+  intro h
+  injection h
+
+/-- Simple addition property -/
+theorem add_zero_right (n : Nat) : n + 0 = n := by
+  rfl
+
+/-- Simple properties -/
+theorem add_succ_eq_succ_add (n m : Nat) : Nat.succ n + m = n + Nat.succ m := by
+  rw [Nat.succ_add, Nat.add_succ]
+
+/-- Properties of lists -/
+theorem list_length_ge_zero (α : Type) (xs : List α) : xs.length ≥ 0 := by
+  cases xs with
+  | nil => simp
+  | cons y ys => simp [Nat.zero_le]
+
+/-- Properties of options -/
+theorem option_some_eq_some (α : Type) (x y : α) : some x = some y ↔ x = y := by
+  constructor
+  · intro h
+    injection h
+  · intro h
+    rw [h]
+
+File: test_12_apply_tactic.lean | Mode: newline
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Using apply tactic -/
+theorem apply_example (P Q : Prop) : (P → Q) → P → Q := by
+  intro hpq hp
+  apply hpq
+  exact hp
+
+/-- Apply with functions -/
+theorem apply_function (n : Nat) : n ≥ 0 := by
+  apply Nat.zero_le
+
+/-- Apply with equality -/
+theorem apply_eq (n m : Nat) : n = m → m = n := by
+  intro h
+  apply Eq.symm
+  exact h
+
+/-- Apply with multiple arguments -/
+theorem apply_multiple (n m k : Nat) : n ≤ m → m ≤ k → n ≤ k := by
+  intros h1 h2
+  apply Nat.le_trans
+  · exact h1
+  · exact h2
+
+/-- Apply with conjunction -/
+theorem apply_and (P Q : Prop) : P ∧ Q → P := by
+  intro h
+  apply And.left
+  exact h
+
+/-- Apply with disjunction -/
+theorem apply_or (P Q R : Prop) : P → P ∨ Q ∨ R := by
+  intro hp
+  apply Or.inl
+  exact hp
+
+File: test_12_apply_tactic.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Using apply tactic -/
+theorem apply_example (P Q : Prop) : (P → Q) → P → Q := by
+  intro hpq hp
+  apply hpq
+  exact hp
+
+/-- Apply with functions -/
+theorem apply_function (n : Nat) : n ≥ 0 := by
+  apply Nat.zero_le
+
+/-- Apply with equality -/
+theorem apply_eq (n m : Nat) : n = m → m = n := by
+  intro h
+  apply Eq.symm
+  exact h
+
+/-- Apply with multiple arguments -/
+theorem apply_multiple (n m k : Nat) : n ≤ m → m ≤ k → n ≤ k := by
+  intros h1 h2
+  apply Nat.le_trans
+  · exact h1
+  · exact h2
+
+/-- Apply with conjunction -/
+theorem apply_and (P Q : Prop) : P ∧ Q → P := by
+  intro h
+  apply And.left
+  exact h
+
+/-- Apply with disjunction -/
+theorem apply_or (P Q R : Prop) : P → P ∨ Q ∨ R := by
+  intro hp
+  apply Or.inl
+  exact hp
+
+File: test_13_ring_tactic.lean | Mode: newline
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Simple arithmetic properties -/
+theorem simple_mul_zero (x : Nat) : x * 0 = 0 := by
+  simp
+
+/-- Simple addition properties -/
+theorem simple_add_zero (x : Nat) : x + 0 = x := by
+  simp
+
+/-- Simple successor properties -/
+theorem simple_succ_eq_add_one (x : Nat) : Nat.succ x = x + 1 := by
+  simp
+
+/-- Simple multiplication properties -/
+theorem simple_mul_one (x : Nat) : x * 1 = x := by
+  simp
+
+/-- Simple power properties -/
+theorem simple_pow_zero (x : Nat) : x^0 = 1 := by
+  simp
+
+File: test_13_ring_tactic.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Simple arithmetic properties -/
+theorem simple_mul_zero (x : Nat) : x * 0 = 0 := by
+  simp
+
+/-- Simple addition properties -/
+theorem simple_add_zero (x : Nat) : x + 0 = x := by
+  simp
+
+/-- Simple successor properties -/
+theorem simple_succ_eq_add_one (x : Nat) : Nat.succ x = x + 1 := by
+  simp
+
+/-- Simple multiplication properties -/
+theorem simple_mul_one (x : Nat) : x * 1 = x := by
+  simp
+
+/-- Simple power properties -/
+theorem simple_pow_zero (x : Nat) : x^0 = 1 := by
+  simp
+
+File: test_14_linarith_tactic.lean | Mode: newline
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Simple inequalities -/
+theorem simple_ineq (x y : Nat) : x ≤ x + y := by
+  exact Nat.le_add_right x y
+
+/-- Transitivity of less equal -/
+theorem le_trans_simple (a b c : Nat) : a ≤ b → b ≤ c → a ≤ c := by
+  intros h1 h2
+  exact Nat.le_trans h1 h2
+
+/-- Addition preserves inequalities -/
+theorem add_le_add (x y z : Nat) : x ≤ y → x + z ≤ y + z := by
+  intro h
+  exact Nat.add_le_add_right h z
+
+/-- Multiplication by two -/
+theorem mul_two (n : Nat) : 2 * n = n + n := by
+  simp [Nat.two_mul]
+
+/-- Simple arithmetic -/
+theorem add_comm_simple (a b : Nat) : a + b = b + a := by
+  exact Nat.add_comm a b
+
+File: test_14_linarith_tactic.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Simple inequalities -/
+theorem simple_ineq (x y : Nat) : x ≤ x + y := by
+  exact Nat.le_add_right x y
+
+/-- Transitivity of less equal -/
+theorem le_trans_simple (a b c : Nat) : a ≤ b → b ≤ c → a ≤ c := by
+  intros h1 h2
+  exact Nat.le_trans h1 h2
+
+/-- Addition preserves inequalities -/
+theorem add_le_add (x y z : Nat) : x ≤ y → x + z ≤ y + z := by
+  intro h
+  exact Nat.add_le_add_right h z
+
+/-- Multiplication by two -/
+theorem mul_two (n : Nat) : 2 * n = n + n := by
+  simp [Nat.two_mul]
+
+/-- Simple arithmetic -/
+theorem add_comm_simple (a b : Nat) : a + b = b + a := by
+  exact Nat.add_comm a b
+
+File: test_15_norm_num_tactic.lean | Mode: newline
+--------------------------------------------------------------------------------
+import Mathlib.Tactic.NormNum
+
+File: test_15_norm_num_tactic.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+import Mathlib.Tactic.NormNum
+
+File: test_16_constructor_tactic.lean | Mode: newline
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Using constructor for conjunction -/
+theorem constructor_and (P Q : Prop) : P → Q → P ∧ Q := by
+  intros hp hq
+  constructor
+  · exact hp
+  · exact hq
+
+/-- Constructor for disjunction -/
+theorem constructor_or_left (P Q : Prop) : P → P ∨ Q := by
+  intro hp
+  constructor
+  exact hp
+
+/-- Constructor for existential -/
+theorem constructor_exists (n : Nat) : ∃ m, n = m := by
+  constructor
+  rfl
+
+/-- Constructor for custom inductive types -/
+inductive MyColor
+  | red
+  | green
+  | blue
+
+def example_color : MyColor := MyColor.red
+
+/-- Constructor with multiple cases -/
+inductive SimpleTree (α : Type)
+  | leaf (val : α)
+  | node (left right : SimpleTree α)
+
+def example_tree (x y z : Nat) : SimpleTree Nat :=
+  SimpleTree.node (SimpleTree.leaf x) (SimpleTree.leaf y)
+
+File: test_16_constructor_tactic.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Using constructor for conjunction -/
+theorem constructor_and (P Q : Prop) : P → Q → P ∧ Q := by
+  intros hp hq
+  constructor
+  · exact hp
+  · exact hq
+
+/-- Constructor for disjunction -/
+theorem constructor_or_left (P Q : Prop) : P → P ∨ Q := by
+  intro hp
+  constructor
+  exact hp
+
+/-- Constructor for existential -/
+theorem constructor_exists (n : Nat) : ∃ m, n = m := by
+  constructor
+  rfl
+
+/-- Constructor for custom inductive types -/
+inductive MyColor
+  | red
+  | green
+  | blue
+
+def example_color : MyColor := MyColor.red
+
+/-- Constructor with multiple cases -/
+inductive SimpleTree (α : Type)
+  | leaf (val : α)
+  | node (left right : SimpleTree α)
+
+def example_tree (x y z : Nat) : SimpleTree Nat :=
+  SimpleTree.node (SimpleTree.leaf x) (SimpleTree.leaf y)
+
+File: test_17_split_tactic.lean | Mode: newline
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Simple conjunction extraction -/
+theorem conj_left (P Q : Prop) : P ∧ Q → P := by
+  intro h
+  exact h.left
+
+/-- Simple implication application -/
+theorem imp_app (P Q R : Prop) : (P → Q ∧ R) → (P → Q) := by
+  intros h hp
+  exact (h hp).left
+
+/-- Universal quantification application -/
+theorem forall_app (P : Nat → Prop) : (∀ n, P n) → P 0 := by
+  intro h
+  exact h 0
+
+/-- Existential quantification -/
+theorem exists_nat (n : Nat) : ∃ m, n = m := by
+  exists n
+
+/-- Cases with natural numbers -/
+theorem nat_cases (n : Nat) : n = 0 ∨ ∃ m, n = Nat.succ m := by
+  cases n with
+  | zero => left; rfl
+  | succ m => right; exists m
+
+File: test_17_split_tactic.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Simple conjunction extraction -/
+theorem conj_left (P Q : Prop) : P ∧ Q → P := by
+  intro h
+  exact h.left
+
+/-- Simple implication application -/
+theorem imp_app (P Q R : Prop) : (P → Q ∧ R) → (P → Q) := by
+  intros h hp
+  exact (h hp).left
+
+/-- Universal quantification application -/
+theorem forall_app (P : Nat → Prop) : (∀ n, P n) → P 0 := by
+  intro h
+  exact h 0
+
+/-- Existential quantification -/
+theorem exists_nat (n : Nat) : ∃ m, n = m := by
+  exists n
+
+/-- Cases with natural numbers -/
+theorem nat_cases (n : Nat) : n = 0 ∨ ∃ m, n = Nat.succ m := by
+  cases n with
+  | zero => left; rfl
+  | succ m => right; exists m
+
+File: test_18_intro_tactic.lean | Mode: newline
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Using intro for implication -/
+theorem intro_imp (P Q : Prop) : P → Q → P ∧ Q := by
+  intro hp
+  intro hq
+  constructor
+  · exact hp
+  · exact hq
+
+/-- Intro with patterns -/
+theorem intro_pattern (n : Nat) : ∀ m, n + m = m + n := by
+  intro m
+  rw [Nat.add_comm]
+
+/-- Intro for universal quantification -/
+theorem intro_forall : ∀ n : Nat, n ≥ 0 := by
+  intro n
+  exact Nat.zero_le n
+
+/-- Intro with multiple variables -/
+theorem intro_multiple (a b c : Nat) : a + b + c = a + b + c := by
+  intros
+  rfl
+
+/-- Intro with simple case -/
+theorem intro_simple : ∃ n, n = 0 := by
+  exists 0
+
+/-- Intro with variables -/
+theorem intro_vars (x : Nat) : x = x := by
+  rfl
+
+File: test_18_intro_tactic.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Using intro for implication -/
+theorem intro_imp (P Q : Prop) : P → Q → P ∧ Q := by
+  intro hp
+  intro hq
+  constructor
+  · exact hp
+  · exact hq
+
+/-- Intro with patterns -/
+theorem intro_pattern (n : Nat) : ∀ m, n + m = m + n := by
+  intro m
+  rw [Nat.add_comm]
+
+/-- Intro for universal quantification -/
+theorem intro_forall : ∀ n : Nat, n ≥ 0 := by
+  intro n
+  exact Nat.zero_le n
+
+/-- Intro with multiple variables -/
+theorem intro_multiple (a b c : Nat) : a + b + c = a + b + c := by
+  intros
+  rfl
+
+/-- Intro with simple case -/
+theorem intro_simple : ∃ n, n = 0 := by
+  exists 0
+
+/-- Intro with variables -/
+theorem intro_vars (x : Nat) : x = x := by
+  rfl
+
+File: test_19_exact_tactic.lean | Mode: newline
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Using exact for direct proof -/
+theorem exact_refl (n : Nat) : n = n := by
+  exact rfl
+
+/-- Exact with hypothesis -/
+theorem exact_hyp (P : Prop) : P → P := by
+  intro h
+  exact h
+
+/-- Exact with function application -/
+theorem exact_function (n : Nat) : n + 0 = n := by
+  exact Nat.add_zero n
+
+/-- Exact with multiple hypotheses -/
+theorem exact_multiple (P Q : Prop) : P → Q → P ∧ Q := by
+  intros hp hq
+  exact ⟨hp, hq⟩
+
+/-- Exact with equality -/
+theorem exact_eq (n m : Nat) : n = m → m = n := by
+  intro h
+  exact Eq.symm h
+
+/-- Exact with constructors -/
+inductive MyBool
+  | mytrue
+  | myfalse
+
+def exact_constructor : MyBool := MyBool.mytrue
+
+File: test_19_exact_tactic.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+
+/-- Using exact for direct proof -/
+theorem exact_refl (n : Nat) : n = n := by
+  exact rfl
+
+/-- Exact with hypothesis -/
+theorem exact_hyp (P : Prop) : P → P := by
+  intro h
+  exact h
+
+/-- Exact with function application -/
+theorem exact_function (n : Nat) : n + 0 = n := by
+  exact Nat.add_zero n
+
+/-- Exact with multiple hypotheses -/
+theorem exact_multiple (P Q : Prop) : P → Q → P ∧ Q := by
+  intros hp hq
+  exact ⟨hp, hq⟩
+
+/-- Exact with equality -/
+theorem exact_eq (n m : Nat) : n = m → m = n := by
+  intro h
+  exact Eq.symm h
+
+/-- Exact with constructors -/
+inductive MyBool
+  | mytrue
+  | myfalse
+
+def exact_constructor : MyBool := MyBool.mytrue
+
+File: test_20_mixed_tactics.lean | Mode: newline
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+import Mathlib.Data.List.Basic
+
+/-- Mixed tactics: induction + simp -/
+theorem mixed_induction_simp (n : Nat) : 0 + n = n := by
+  induction n with
+  | zero => simp
+  | succ k ih => simp [ih]
+
+/-- Mixed tactics: cases + constructor -/
+theorem mixed_cases_constructor (n : Nat) : n = 0 ∨ ∃ m, n = Nat.succ m := by
+  cases n with
+  | zero =>
+    left
+    rfl
+  | succ m =>
+    right
+    exists m
+
+/-- Mixed tactics: intro + apply -/
+theorem mixed_intro_apply (P Q R : Prop) : (P → Q) → (Q → R) → (P → R) := by
+  intros hpq hqr hp
+  apply hqr
+  exact (hpq hp)
+
+/-- Mixed tactics: induction + rewrite -/
+theorem mixed_induction_rewrite (n : Nat) : Nat.succ n = n + 1 := by
+  induction n with
+  | zero => rfl
+  | succ k ih => rw [Nat.add_succ, ih]
+
+/-- Mixed tactics: cases + have + exact -/
+theorem mixed_cases_have (n : Nat) : ∃ m, n = m := by
+  cases n with
+  | zero =>
+    have h : 0 = 0 := rfl
+    exists 0
+  | succ k =>
+    exists Nat.succ k
+
+File: test_20_mixed_tactics.lean | Mode: semicolon
+--------------------------------------------------------------------------------
+import Mathlib.Data.Nat.Basic
+import Mathlib.Data.List.Basic
+
+/-- Mixed tactics: induction + simp -/
+theorem mixed_induction_simp (n : Nat) : 0 + n = n := by
+  induction n with
+  | zero => simp
+  | succ k ih => simp [ih]
+
+/-- Mixed tactics: cases + constructor -/
+theorem mixed_cases_constructor (n : Nat) : n = 0 ∨ ∃ m, n = Nat.succ m := by
+  cases n with
+  | zero =>
+    left
+    rfl
+  | succ m =>
+    right
+    exists m
+
+/-- Mixed tactics: intro + apply -/
+theorem mixed_intro_apply (P Q R : Prop) : (P → Q) → (Q → R) → (P → R) := by
+  intros hpq hqr hp
+  apply hqr
+  exact (hpq hp)
+
+/-- Mixed tactics: induction + rewrite -/
+theorem mixed_induction_rewrite (n : Nat) : Nat.succ n = n + 1 := by
+  induction n with
+  | zero => rfl
+  | succ k ih => rw [Nat.add_succ, ih]
+
+/-- Mixed tactics: cases + have + exact -/
+theorem mixed_cases_have (n : Nat) : ∃ m, n = m := by
+  cases n with
+  | zero =>
+    have h : 0 = 0 := rfl
+    exists 0
+  | succ k =>
+    exists Nat.succ k
+
+================================================================================

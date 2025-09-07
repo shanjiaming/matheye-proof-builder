@@ -31,3 +31,15 @@ pnpm-debug.log*
 test-workspace/
 CLAUDE.md
 .serena/
+
+# YoYo AI version control directory
+.yoyo/
+# Generated round-trip outputs and debug artifacts
+test_cases/out_*.lean
+test_cases/debug_*.lean
+test_cases/debug_*.txt
+debug_*.txt
+debug_*.lean
+temp_*.lean
+simple_test.lean
+*.olean

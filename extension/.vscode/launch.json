@@ -2,16 +2,18 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "🚀 启动插件（开发模式）",
+      "name": "Run Extension",
       "type": "extensionHost",
       "request": "launch",
+      "env": {
+        "MATHEYE_TEST_MODE": "1",
+        "MATHEYE_USE_REAL_RPC": "1"
+      },
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}",
-        "${workspaceFolder}/../test-workspace"
+        "${workspaceFolder}/.."
       ],
-      "outFiles": [
-        "${workspaceFolder}/out/**/*.js"
-      ]
+      "preLaunchTask": "preLaunch"
     }
   ]
 }
