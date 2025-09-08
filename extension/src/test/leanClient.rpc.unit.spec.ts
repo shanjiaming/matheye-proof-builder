@@ -33,6 +33,9 @@ const sendRequestStub = async (method: string, payload: any) => {
     if (payload.method === 'MathEye.insertHaveByAction') {
       return { success: true, newText: 'by\n  exact h\n', range: { start: { line: 3, character: 1 }, stop: { line: 7, character: 2 } } };
     }
+    if (payload.method === 'MathEye.restoreByBlock') {
+      return { success: true, newText: 'full-file-text', range: { start: { line: 0, character: 0 }, stop: { line: 9999, character: 0 } } };
+    }
   }
   if (method === "$/lean/plainGoal") {
     return { goals: [ { hyps: [], goal: '⊢ P' } ] };
@@ -82,6 +85,17 @@ describe('LeanClientService RPC wrappers', () => {
     expect(res.success).to.equal(true);
     expect(res.newText).to.contain('exact');
     expect(res.range!.start.line).to.equal(3);
+  });
+
+  it('restoreByBlock surfaces success', async () => {
+    const svc = new LeanClientService(mockOutputChannel);
+    const fakeDoc: any = { uri: { toString: () => 'file:///tmp.lean' } };
+    const res = await (svc as any).restoreByBlock(fakeDoc, {
+      blockRange: new MockRange(new MockPosition(0,0) as any, new MockPosition(1,0) as any) as any,
+      originalByBlockContent: 'by\n  exact rfl\n'
+    });
+    expect(res.success).to.equal(true);
+    expect(res.newText).to.equal('full-file-text');
   });
 
   it('insertHaveByAction surfaces failure', async () => {

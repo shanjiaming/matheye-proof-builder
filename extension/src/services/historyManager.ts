@@ -9,30 +9,16 @@ export interface HistoryOperation {
     // core intent
     type: 'admit' | 'deny';
     goalIndex: number;
-    // anchor (MVP)
-    declName?: string;
-    path?: AnchorPathItem[];
-    originalBody?: string;
-    anchorPos?: { line: number; character: number };
-    // legacy fields (kept temporarily until anchor-based rollback is wired end-to-end)
+    // storage: full by-block range and original text content
     byBlockRange: vscode.Range;
     originalByBlockContent: string;
+    // extra diagnostics kept for eligibility checks
     insertedText: string;
-    replacedText?: string;
-    documentVersion?: number;
     byBlockStartLine: number;
-    insertRelStartLine: number;
-    insertRelStartChar: number;
-    insertRelEndLine: number;
-    insertRelEndChar: number;
     absStartLine: number;
     absStartChar: number;
     absEndLine: number;
     absEndChar: number;
-    replacedRangeStartLine?: number;
-    replacedRangeStartChar?: number;
-    replacedRangeEndLine?: number;
-    replacedRangeEndChar?: number;
     timestamp: number;
     documentUri: string;
 }
@@ -77,10 +63,11 @@ export class HistoryManager {
         const ops = this.operationsByDoc.get(document.uri.toString());
         if (!ops || ops.length === 0) return false;
         const content = document.getText(blockRange);
-        // Find last op whose insertedText exists exactly in current block content
+        // 简化安全检查：只要当前块仍然包含插入片段或块范围未坍塌，就允许回滚
         for (let i = ops.length - 1; i >= 0; i--) {
             const op = ops[i];
             if (content.includes(op.insertedText)) return true;
+            if (op.byBlockRange.start.line === blockRange.start.line && op.byBlockRange.end.line === blockRange.end.line) return true;
         }
         return false;
     }

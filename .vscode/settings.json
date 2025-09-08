@@ -26,5 +26,6 @@
         "**/Thumbs.db": true,
         ".yoyo": true
     },
-    "editor.tabSize": 2
+    "editor.tabSize": 2,
+    "matheye.logLevel": "debug"
 }

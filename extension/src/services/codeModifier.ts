@@ -92,15 +92,7 @@ export class CodeModifierService {
             }
             if (byBlockInfo) this.outputChannel.appendLine(`[DEBUG] byBlock backup captured (${byBlockInfo.range.start.line}-${byBlockInfo.range.end.line})`);
 
-            // Capture anchor (MVP): declName + path + original body, for per-block history
-            let anchorPayload: any = null;
-            try {
-                const ca = await this.leanClient.captureAnchor(logicalCursor.position, document);
-                if (ca && ca.success) {
-                    this.outputChannel.appendLine(`[ANCHOR] pathLen=${(ca.path||[]).length}`);
-                    anchorPayload = { declName: ca.declName || '', path: ca.path || [], originalBody: ca.originalBody || '', anchorPos: ca.anchorPos };
-                }
-            } catch {}
+            // 不再依赖锚点：回滚完全基于 byBlockRange + originalByBlockContent
 
             // Pure AST path: delegate edit to Lean RPC and apply returned range/text
             const goal = goals[feedback.goalIndex];
@@ -175,26 +167,14 @@ export class CodeModifierService {
             if (byBlockInfo) {
                 const usedStart = resp.range!.start;
                 const usedEnd = resp.range!.end;
-                const relStartLine = usedStart.line - byBlockInfo.range.start.line;
-                const relEndLine = usedEnd.line - byBlockInfo.range.start.line;
-                const anchor = anchorPayload || {};
+                // keep only by-block essentials in history; no string diffs
                 const historyOperation: HistoryOperation = {
                     type: action,
                     goalIndex: feedback.goalIndex,
-                    declName: anchor.declName,
-                    path: anchor.path,
-                    originalBody: anchor.originalBody,
-                    anchorPos: anchor.anchorPos ? { line: anchor.anchorPos.line, character: anchor.anchorPos.character } : undefined,
                     byBlockRange: byBlockInfo.range,
                     originalByBlockContent: byBlockInfo.content,
                     insertedText: resp.newText || '',
-                    replacedText: replacedTextBefore,
-                    documentVersion: (document as any).version ?? undefined,
                     byBlockStartLine: byBlockInfo.range.start.line,
-                    insertRelStartLine: relStartLine,
-                    insertRelStartChar: usedStart.character,
-                    insertRelEndLine: relEndLine,
-                    insertRelEndChar: usedEnd.character,
                     absStartLine: usedStart.line,
                     absStartChar: usedStart.character,
                     absEndLine: usedEnd.line,
@@ -312,28 +292,23 @@ export class CodeModifierService {
                 return false;
             }
             const operation = lastOp as any;
-            // Anchor-based restore: no fallback to ranges
-            if (!operation.path || !operation.originalBody || !operation.anchorPos) {
-                vscode.window.showErrorMessage('回滚失败：历史锚缺失');
-                return false;
-            }
-            const res = await this.leanClient.restoreByAnchor(document, {
-                declName: operation.declName || '',
-                path: operation.path || [],
-                originalBody: operation.originalBody || '',
-                anchorPos: new vscode.Position(operation.anchorPos.line, operation.anchorPos.character)
+            // 优先使用完整的 byBlock 内容进行回滚（AST 解析 + 整块替换 + 全文件重排版）
+            const byRes = await this.leanClient.restoreByBlock(document, {
+                blockRange: operation.byBlockRange,
+                originalByBlockContent: operation.originalByBlockContent,
             });
-            if (!res.success || !res.newText || !res.range) {
-                vscode.window.showErrorMessage(`回滚失败：${res.errorMsg || '未知错误'}`);
+            if (!byRes.success || !byRes.newText || !byRes.range) {
+                vscode.window.showErrorMessage(`回滚失败：${byRes.errorMsg || '未知错误'}`);
                 return false;
             }
-            const edit = new vscode.WorkspaceEdit();
-            // Always whole-file replace on restore
-            const fullRange = new vscode.Range(0, 0, document.lineCount, 0);
-            edit.replace(document.uri, fullRange, res.newText);
-            const ok = await vscode.workspace.applyEdit(edit);
-            if (ok) this.historyManager.clearLastOperationForDocument(document);
-            return ok;
+            {
+                const edit = new vscode.WorkspaceEdit();
+                const fullRange = new vscode.Range(0, 0, document.lineCount, 0);
+                edit.replace(document.uri, fullRange, byRes.newText);
+                const ok = await vscode.workspace.applyEdit(edit);
+                if (ok) this.historyManager.clearLastOperationForDocument(document);
+                return ok;
+            }
 
         } catch (error) {
             const errorMsg = `Error during rollback: ${error}`;

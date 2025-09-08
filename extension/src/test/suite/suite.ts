@@ -95,11 +95,14 @@ suite('MathEye Integration', () => {
 
   async function snapshotWithMarker(doc: vscode.TextDocument, editor: vscode.TextEditor, pos: vscode.Position, outPath: string) {
     const marker = '⟦CURSOR⟧';
-    // insert marker
-    await editor.edit((eb) => eb.insert(pos, marker));
-    try { fs.writeFileSync(outPath, doc.getText(), 'utf8'); } catch {}
-    // remove marker
-    await editor.edit((eb) => eb.delete(new vscode.Range(pos, new vscode.Position(pos.line, pos.character + marker.length))));
+    const text = doc.getText();
+    const lines = text.split('\n');
+    const lineText = lines[pos.line] || '';
+    const before = lineText.slice(0, pos.character);
+    const after = lineText.slice(pos.character);
+    lines[pos.line] = before + marker + after;
+    const markedText = lines.join('\n');
+    try { fs.writeFileSync(outPath, markedText, 'utf8'); } catch {}
   }
 
   function uniqueFile(name: string): string {

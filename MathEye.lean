@@ -614,13 +614,36 @@ def buildIndentedSeq (args : Array Syntax) : Syntax :=
   from a syntax path, falling back to the provided leaf if none is present.
 -/
 private def chooseSmallestTacticSeq (stxs : List Syntax) (fallback : Syntax) : Syntax :=
+  -- Find all tacticSeq kinds first
+  let isTacticSeqKind (k : Name) : Bool :=
+    k == `Lean.Parser.Tactic.tacticSeq ||
+    k == `Lean.Parser.Tactic.tacticSeq1Indented ||
+    k == `Lean.Parser.Tactic.tacticSeqBracketed
   let candidates := stxs.filter (fun s => isTacticSeqKind s.getKind)
   match candidates with
-  | []      => fallback
+  | [] =>
+    -- No tacticSeq found, look for byTactic containers
+    let containerCandidates := stxs.filter (fun s =>
+      s.getKind == `Lean.Parser.Term.byTactic)
+    match containerCandidates with
+    | [] => fallback
+    | c :: cs =>
+      let pick (a b : Syntax) : Syntax :=
+        match a.getRange?, b.getRange? with
+        | some ra, some rb =>
+          let lenA := ra.stop.byteIdx - ra.start.byteIdx
+          let lenB := rb.stop.byteIdx - rb.start.byteIdx
+          if lenA ≤ lenB then a else b
+        | _, _ => a
+      cs.foldl pick c
   | c :: cs =>
+    -- Found tacticSeq candidates, pick the smallest
     let pick (a b : Syntax) : Syntax :=
       match a.getRange?, b.getRange? with
-      | some ra, some rb => if ra.stop.byteIdx - ra.start.byteIdx ≤ rb.stop.byteIdx - rb.start.byteIdx then a else b
+      | some ra, some rb =>
+        let lenA := ra.stop.byteIdx - ra.start.byteIdx
+        let lenB := rb.stop.byteIdx - rb.start.byteIdx
+        if lenA ≤ lenB then a else b
       | _, _ => a
     cs.foldl pick c
 
@@ -978,13 +1001,75 @@ def getByBlockRange (params : ByBlockRangeParams) : RequestM (RequestTask ByBloc
 
     match tacticResults.head? with
     | some r0 =>
-      let path := tacticResults
-      let stxs := path.map (fun rr => rr.tacticInfo.stx)
+      -- Get the complete syntax path by walking up from the tactic node
+      -- We need to find the parent containers that contain this tactic
+      let tacticStx := r0.tacticInfo.stx
+      -- Get complete syntax path by probing around the position to find parent containers
+      let stxs := Id.run do
+        let leafStx := r0.tacticInfo.stx
+        let leafRange? := leafStx.getRange?
+        match leafRange? with
+        | none => [leafStx]
+        | some leafRg =>
+          -- Probe positions around the leaf to find parent containers
+          let probePositions : List String.Pos := [
+            ⟨leafRg.start.byteIdx⟩,
+            ⟨if leafRg.start.byteIdx > 0 then leafRg.start.byteIdx - 1 else leafRg.start.byteIdx⟩,
+            ⟨if leafRg.start.byteIdx > 1 then leafRg.start.byteIdx - 2 else leafRg.start.byteIdx⟩,
+            ⟨if leafRg.start.byteIdx > 2 then leafRg.start.byteIdx - 3 else leafRg.start.byteIdx⟩
+          ]
+          let mut allContainers : List Syntax := []
+          for pos in probePositions do
+            let resultsAtPos := snap.infoTree.goalsAt? text pos
+            for res in resultsAtPos do
+              let stx := res.tacticInfo.stx
+              -- Only include containers that properly contain our leaf node
+              match stx.getRange? with
+              | some stxRg =>
+                if stxRg.start.byteIdx ≤ leafRg.start.byteIdx && 
+                   leafRg.stop.byteIdx ≤ stxRg.stop.byteIdx &&
+                   (stxRg.start != leafRg.start || stxRg.stop != leafRg.stop) then
+                  -- Avoid duplicates
+                  if !allContainers.any (fun existing => 
+                    match existing.getRange? with
+                    | some exRg => exRg.start == stxRg.start && exRg.stop == stxRg.stop
+                    | none => false) then
+                    allContainers := stx :: allContainers
+              | none => continue
+          -- Add the leaf node itself
+          allContainers := leafStx :: allContainers
+          -- Sort by range size (largest first) to get proper nesting order
+          let sorted := allContainers.toArray.qsort (fun a b =>
+            match a.getRange?, b.getRange? with
+            | some ra, some rb =>
+              let lenA := ra.stop.byteIdx - ra.start.byteIdx
+              let lenB := rb.stop.byteIdx - rb.start.byteIdx
+              lenA > lenB
+            | _, _ => false)
+          sorted.toList
+
       -- Collect syntax context information
       let parentKinds : Array String := stxs.toArray.map (fun s => s.getKind.toString)
       let hasMatchAlt := parentKinds.any (fun k => k.startsWith "Lean.Parser.Term.matchAlt" || k.startsWith "Lean.Parser.Tactic.matchRhs")
+
+      -- Debug: log syntax path and container selection
+      let debugMsg := s!"=== getByBlockRange Debug ===
+Position: line {params.pos.line}, char {params.pos.character}
+Complete syntax path nodes: {parentKinds.toList}
+Tactic results count: {tacticResults.length}
+"
+      let _ ← IO.FS.writeFile "/tmp/getByBlockRange_debug.log" debugMsg
+
       -- Prefer the smallest enclosing tactic sequence container as the by-block range
+      let debugMsg2 := s!"About to call chooseSmallestTacticSeq with {stxs.length} nodes
+"
+      let _ ← IO.FS.writeFile "/tmp/getByBlockRange_debug.log" (debugMsg ++ debugMsg2)
       let container0 := chooseSmallestTacticSeq stxs r0.tacticInfo.stx
+      let debugMsg3 := s!"chooseSmallestTacticSeq returned: {container0.getKind}
+Selected container0: {container0.getKind}
+"
+      let _ ← IO.FS.writeFile "/tmp/getByBlockRange_debug.log" (debugMsg ++ debugMsg2 ++ debugMsg3)
+
       -- If the chosen node is a term `by` container, descend to its tacticSeq child when available
       let rec findTacticSeqChild (s : Syntax) : Option Syntax :=
         if isTacticSeqKind s.getKind then some s else
@@ -998,15 +1083,33 @@ def getByBlockRange (params : ByBlockRangeParams) : RequestM (RequestTask ByBloc
             else none
           loop 0
         | _ => none
-      -- Enforce tactic-only: if no tacticSeq child found, report failure rather than mixing term context
-      let container? := (findTacticSeqChild container0)
-      let some container := container? | return {
-        range := { start := params.pos, stop := params.pos },
-        success := false,
-        errorMsg := some "no tactic container",
-        isTacticContext := false,
-        isTermContext := false
-      }
+
+      -- Prefer tacticSeq child if available; otherwise use container0
+      -- This ensures the returned range points to the block body, not the 'by' header
+      let rec findTacticSeqChild (s : Syntax) : Option Syntax :=
+        if isTacticSeqKind s.getKind then some s else
+        match s with
+        | .node _ _ args =>
+          let rec loop (i : Nat) : Option Syntax :=
+            if h : i < args.size then
+              match findTacticSeqChild (args[i]'h) with
+              | some t => some t
+              | none => loop (i+1)
+            else none
+          loop 0
+        | _ => none
+      let container := match findTacticSeqChild container0 with
+        | some seq => seq
+        | none     => container0
+      let finalMsg := match container.getRange? with
+        | some rg => s!"Final container: {container.getKind}
+Container range: {rg.start.byteIdx}-{rg.stop.byteIdx}
+"
+        | none => s!"Final container: {container.getKind}
+Container has no range!
+"
+      let _ ← IO.FS.writeFile "/tmp/getByBlockRange_debug.log" (debugMsg ++ debugMsg2 ++ debugMsg3 ++ finalMsg)
+
       let some rg := container.getRange? | return {
         range := { start := params.pos, stop := params.pos },
         success := false,
@@ -1105,151 +1208,60 @@ structure AnchorPathItem where
   idx  : Nat
   deriving FromJson, ToJson
 
-structure CaptureAnchorParams where
-  pos : Lsp.Position
-  deriving FromJson, ToJson
+-- Legacy anchor APIs removed
 
-structure CaptureAnchorResult where
-  declName : String
-  path : Array AnchorPathItem := #[]
-  originalBody : String
-  anchorPos : Lsp.Position
-  success : Bool
-  errorMsg : Option String := none
-  deriving FromJson, ToJson
+  /-
+    Restore an entire by-block from recorded range and original text using AST-only operations.
+    Steps:
+    - Anchor at recorded block start to obtain environment
+    - Parse `originalByBlockContent` into a tactic sequence AST
+    - Replace the node at `blockRange` with the pretty-printed sequence
+    - Return whole-file text to enforce deterministic formatting
+  -/
+  structure RestoreByBlockParams where
+    blockRange : RangeDto
+    originalByBlockContent : String
+    deriving FromJson, ToJson
 
-@[server_rpc_method]
-def captureAnchor (params : CaptureAnchorParams) : RequestM (RequestTask CaptureAnchorResult) := do
-  withWaitFindSnapAtPos params.pos fun snap => do
-    let doc ← readDoc
-    let text : FileMap := doc.meta.text
-    let hoverPos : String.Pos := text.lspPosToUtf8Pos params.pos
-    -- Robust probe to avoid seam: try around hover position
-    let results :=
-      let rs0 := snap.infoTree.goalsAt? text hoverPos
-      if rs0.isEmpty then
-        let baseLsp := params.pos
-        let probeRight : List Lsp.Position := (List.range 41).map (fun i => { line := baseLsp.line, character := baseLsp.character + i })
-        let probeLeft  : List Lsp.Position := (List.range 4).map (fun i => { line := baseLsp.line, character := baseLsp.character - i })
-        let probes := probeLeft ++ probeRight
-        let rec firstSome (ps : List Lsp.Position) : List GoalsAtResult :=
-          match ps with
-          | [] => rs0
-          | p :: ps' =>
-            let pos := text.lspPosToUtf8Pos p
-            let rs := snap.infoTree.goalsAt? text pos
-            if rs.isEmpty then firstSome ps' else rs
-        firstSome probes
-      else rs0
-    match results.head? with
-    | some r =>
-      let path := results
-      let stxs := path.map (fun rr => rr.tacticInfo.stx)
-      let container := chooseSmallestTacticSeq stxs r.tacticInfo.stx
-      -- Build a simple parent-child index path from outermost to the chosen container
-      let getArgs : Syntax → Array Syntax := fun s => match s with | .node _ _ args => args | _ => #[]
-      let sameRange (a b : Syntax) : Bool :=
-        match a.getRange?, b.getRange? with
-        | some ra, some rb => ra.start == rb.start && ra.stop == rb.stop
-        | _, _ => false
-      let chainOuterToInner : List Syntax := (stxs.reverse)
-      -- find container index and build path without recursion (Id.run loops)
-      let tgtIdx := Id.run do
-        let mut i := 0
-        let mut found := chainOuterToInner.length - 1
-        for s in chainOuterToInner do
-          if sameRange s container then found := i
-          i := i + 1
-        return found
-      let anchorPath := Id.run do
-        let mut acc : Array AnchorPathItem := #[]
-        let mut j := 0
-        while j+1 ≤ tgtIdx do
-          let parent := (chainOuterToInner.get? j).getD Syntax.missing
-          let child  := (chainOuterToInner.get? (j+1)).getD container
-          let args := getArgs parent
-          let mut idx := 0
-          let mut k := 0
-          for a in args do
-            if sameRange a child then idx := k
-            k := k + 1
-          acc := acc.push { kind := parent.getKind.toString, idx := idx }
-          j := j + 1
-        return acc
-      let body ← (r.ctxInfo).runMetaM {} do
-        formatTacticSeq container
-      let some contRg := container.getRange? | return { declName := "", path := anchorPath, originalBody := body, anchorPos := params.pos, success := true }
-      let anchorPos := text.utf8PosToLspPos contRg.start
-      return { declName := "", path := anchorPath, originalBody := body, anchorPos := anchorPos, success := true }
-    | none =>
-      return { declName := "", path := #[], originalBody := "", anchorPos := params.pos, success := false, errorMsg := some "No tactic at pos" }
+  structure RestoreByBlockResult where
+    newText : String := ""
+    range   : RangeDto := { start := { line := 0, character := 0 }, stop := { line := 0, character := 0 } }
+    success : Bool
+    errorMsg : Option String := none
+    deriving FromJson, ToJson
 
-structure RestoreByAnchorParams where
-  declName : String
-  path : Array AnchorPathItem := #[]
-  originalBody : String
-  anchorPos : Lsp.Position
-  deriving FromJson, ToJson
-
-structure RestoreByAnchorResult where
-  newText : String := ""
-  range   : RangeDto := { start := { line := 0, character := 0 }, stop := { line := 0, character := 0 } }
-  success : Bool
-  errorMsg : Option String := none
-  deriving FromJson, ToJson
-
-@[server_rpc_method]
-def restoreByAnchor (params : RestoreByAnchorParams) : RequestM (RequestTask RestoreByAnchorResult) := do
-  -- MVP placeholder: strict Missing to avoid unsafe fallbacks. Full path walk will be implemented next.
-  withWaitFindSnapAtPos params.anchorPos fun snap => do
-    let doc ← readDoc
-    let text : FileMap := doc.meta.text
-    let pos : String.Pos := text.lspPosToUtf8Pos params.anchorPos
-    let results := snap.infoTree.goalsAt? text pos
-    match results.head? with
-    | none => return { success := false, errorMsg := some "Missing" }
-    | some r =>
-      let stxs := results.map (fun rr => rr.tacticInfo.stx)
-      let chainOuterToInner : List Syntax := (stxs.reverse)
-      let getArgs : Syntax → Array Syntax := fun s => match s with | .node _ _ args => args | _ => #[]
-      -- Walk by path
-      let rec walk (cur : Syntax) (i : Nat) : Option Syntax :=
-        if h : i < params.path.size then
-          match params.path.get? i with
-          | none => some cur
-          | some step =>
-            if cur.getKind.toString ≠ step.kind then none else
-            let args := getArgs cur
-            if h2 : step.idx < args.size then
-              let child := args.get? step.idx |>.getD Syntax.missing
-              walk child (i+1)
-            else none
-        else some cur
-      let some top := chainOuterToInner.head? | return { success := false, errorMsg := some "Missing" }
-      let some container := walk top 0 | return { success := false, errorMsg := some "Missing" }
-      -- Parse original body into a tactic sequence
-      let env := r.ctxInfo.env
-      let parsed := Parser.runParserCategory env `tacticSeq1Indented params.originalBody
-      match parsed with
-      | Except.error _ => return { success := false, errorMsg := some "ParseError" }
-      | Except.ok seqNew =>
-        -- Format new body and splice back into whole file
-        let body ← (r.ctxInfo).runMetaM {} do
-          formatTacticSeq seqNew
-        let some contRg := container.getRange? | return { success := false, errorMsg := some "Missing" }
-        let contRange := RangeDto.fromStringRange text contRg
-        let baseIndent := String.mk (List.replicate contRange.start.character ' ')
-        let mkIndented (indent : String) (s : String) : String :=
-          let parts := s.splitOn "\n"
-          parts.foldl (fun acc ln => if acc.isEmpty then indent ++ ln else acc ++ "\n" ++ indent ++ ln) ""
-        let replacementSeg := s!"\n{mkIndented baseIndent body}"
-        let replaceStartUtf8 := text.lspPosToUtf8Pos contRange.start
-        let replaceStopUtf8  := text.lspPosToUtf8Pos contRange.stop
-        let src := text.source
-        let pre := src.extract ⟨0⟩ replaceStartUtf8
-        let suf := src.extract replaceStopUtf8 src.endPos
-        let newFull := pre ++ replacementSeg ++ suf
-        let fullRange : RangeDto := { start := { line := 0, character := 0 }, stop := text.utf8PosToLspPos src.endPos }
-        return { success := true, newText := newFull, range := fullRange }
+  @[server_rpc_method]
+  def restoreByBlock (params : RestoreByBlockParams) : RequestM (RequestTask RestoreByBlockResult) := do
+    withWaitFindSnapAtPos params.blockRange.start fun snap => do
+      let doc ← readDoc
+      let text : FileMap := doc.meta.text
+      let startPos : String.Pos := text.lspPosToUtf8Pos params.blockRange.start
+      let results := snap.infoTree.goalsAt? text startPos
+      match results.head? with
+      | none => return { success := false, errorMsg := some "Missing context at block start" }
+      | some r =>
+        -- Parse recorded content as a tactic sequence; do not rely on string surgery
+        let env := r.ctxInfo.env
+        let parsed := Parser.runParserCategory env `tacticSeq1Indented params.originalByBlockContent
+        match parsed with
+        | Except.error _ => return { success := false, errorMsg := some "ParseError" }
+        | Except.ok seqNew =>
+          -- Pretty print via Lean formatter, then splice back at recorded range
+          let body ← (r.ctxInfo).runMetaM {} do
+            formatTacticSeq seqNew
+          let contRange := params.blockRange
+          let baseIndent := String.mk (List.replicate contRange.start.character ' ')
+          let mkIndented (indent : String) (s : String) : String :=
+            let parts := s.splitOn "\n"
+            parts.foldl (fun acc ln => if acc.isEmpty then indent ++ ln else acc ++ "\n" ++ indent ++ ln) ""
+          let replacementSeg := "\n" ++ mkIndented baseIndent body
+          let replaceStartUtf8 := text.lspPosToUtf8Pos contRange.start
+          let replaceStopUtf8  := text.lspPosToUtf8Pos contRange.stop
+          let src := text.source
+          let pre := src.extract ⟨0⟩ replaceStartUtf8
+          let suf := src.extract replaceStopUtf8 src.endPos
+          let newFull := pre ++ replacementSeg ++ suf
+          let fullRange : RangeDto := { start := { line := 0, character := 0 }, stop := text.utf8PosToLspPos src.endPos }
+          return { success := true, newText := newFull, range := fullRange }
 
 end MathEye

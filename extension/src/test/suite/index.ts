@@ -8,7 +8,8 @@ export function run(): Promise<void> {
   const mocha = new Mocha({ ui: 'tdd', timeout: 120000, color: true });
   const testsRoot = __dirname;
   const onlyComplex = process.env.MATHEYE_ONLY_COMPLEX === '1';
-  const candidates = onlyComplex ? ['cases.js'] : ['cases.js', 'suite.js'];
+  const singleCase = process.env.MATHEYE_SINGLE_CASE === '1';
+  const candidates = singleCase ? ['single_case.js'] : (onlyComplex ? ['cases.js'] : ['cases.js', 'suite.js']);
   for (const f of candidates) {
     const full = path.resolve(testsRoot, f);
     try { require('fs').accessSync(full); mocha.addFile(full); } catch {}

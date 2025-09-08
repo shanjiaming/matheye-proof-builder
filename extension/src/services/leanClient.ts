@@ -256,9 +256,9 @@ export class LeanClientService {
                     new vscode.Position(rg.start.line, rg.start.character),
                     new vscode.Position(rg.stop.line, rg.stop.character)
                 );
-                return { 
-                    success: true, 
-                    range, 
+                return {
+                    success: true,
+                    range,
                     isTacticContext: result.isTacticContext,
                     isTermContext: result.isTermContext,
                     isMatchAlt: result.isMatchAlt,
@@ -286,62 +286,39 @@ export class LeanClientService {
         await new Promise(r => setTimeout(r, 200));
     }
 
+    // Removed legacy anchor capture/restore APIs
+
     /**
-     * Capture anchor for position tracking
+     * Restore a by-block using recorded range and original content via MathEye.restoreByBlock
      */
-    async captureAnchor(
-        position: vscode.Position, 
-        document: vscode.TextDocument
-    ): Promise<any> {
+    async restoreByBlock(
+        document: vscode.TextDocument,
+        params: { blockRange: vscode.Range, originalByBlockContent: string }
+    ): Promise<{ success: boolean; newText?: string; range?: vscode.Range; errorMsg?: string }>{
         const client = await this.getLeanClient();
         const uri = document.uri.toString();
-        
         try {
             const sessionId = (await client.sendRequest("$/lean/rpc/connect", { uri })).sessionId;
             const rpcParams = {
                 sessionId,
-                method: "MathEye.captureAnchor",
+                method: "MathEye.restoreByBlock",
                 textDocument: { uri },
-                position: { line: position.line, character: position.character },
+                position: { line: params.blockRange.start.line, character: params.blockRange.start.character },
                 params: {
-                    pos: { line: position.line, character: position.character }
+                    blockRange: {
+                        start: { line: params.blockRange.start.line, character: params.blockRange.start.character },
+                        stop:  { line: params.blockRange.end.line,   character: params.blockRange.end.character }
+                    },
+                    originalByBlockContent: params.originalByBlockContent
                 }
             };
             const result: any = await client.sendRequest("$/lean/rpc/call", rpcParams);
-            return result;
-        } catch (e: any) {
-            return { success: false, errorMsg: String(e) };
-        }
-    }
-
-    /**
-     * Restore position from anchor
-     */
-    async restoreByAnchor(
-        document: vscode.TextDocument,
-        anchor: any
-    ): Promise<{success: boolean, position?: vscode.Position, newText?: string, range?: vscode.Range, errorMsg?: string}> {
-        const client = await this.getLeanClient();
-        const uri = document.uri.toString();
-        
-        try {
-            const sessionId = (await client.sendRequest("$/lean/rpc/connect", { uri })).sessionId;
-            const rpcParams = {
-                sessionId,
-                method: "MathEye.restoreByAnchor",
-                textDocument: { uri },
-                position: anchor && anchor.anchorPos ? { line: anchor.anchorPos.line, character: anchor.anchorPos.character } : { line: 0, character: 0 },
-                params: anchor
-            };
-            const result: any = await client.sendRequest("$/lean/rpc/call", rpcParams);
-            
             if (result && result.success) {
-                const position = result.pos ? new vscode.Position(result.pos.line, result.pos.character) : undefined;
-                const range = result.range ? new vscode.Range(
+                const range = new vscode.Range(
                     new vscode.Position(result.range.start.line, result.range.start.character),
                     new vscode.Position(result.range.stop.line, result.range.stop.character)
-                ) : undefined;
-                return { success: true, position, newText: result.newText, range };
+                );
+                return { success: true, newText: result.newText, range };
             }
             return { success: false, errorMsg: result?.errorMsg || 'unknown error' };
         } catch (e: any) {

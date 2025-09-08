@@ -1,4 +1,4 @@
-import Mathlib
+import Mathlib.Data.Nat.Basic
 import MathEye
 
 macro "human_oracle" : tactic => `(tactic| sorry)
