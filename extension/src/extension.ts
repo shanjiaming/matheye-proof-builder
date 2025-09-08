@@ -505,45 +505,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    // Register command: Analyze Proof Goals (simplified version)
-    // Register command: Toggle Cursor Mode
-    let cycleCursorModeCommand = vscode.commands.registerCommand('matheye.cycleCursorMode', async () => {
-        const nextMode = cursorModeManager.cycleMode();
-        const config = cursorModeManager.getModeConfig(nextMode);
-        vscode.window.showInformationMessage(
-            `光标模式切换为: ${config.label} - ${config.description}`
-        );
-        
-        // 如果webview已打开，刷新显示
-        if (currentPanel && currentEditor) {
-            await updateProofGoals(currentEditor);
-        }
-    });
-
-    let analyzeCommand = vscode.commands.registerCommand('matheye.analyzeProofGoals', async () => {
-        const editor = vscode.window.activeTextEditor;
-        if (!editor || editor.document.languageId !== 'lean4') {
-            vscode.window.showWarningMessage('Please open a Lean 4 file');
-            return;
-        }
-
-        try {
-            const position = editor.selection.active;
-            const response = await leanClient.getProofGoals(position, editor.document);
-            
-            const message = `Analysis complete: Found ${response.goals.length} proof goals`;
-            vscode.window.showInformationMessage(message);
-            
-            outputChannel.appendLine(message);
-            response.goals.forEach((goal, index) => {
-                outputChannel.appendLine(`${index + 1}. ${goal.name || 'unnamed'}: ${goal.type}`);
-            });
-            outputChannel.show();
-
-        } catch (error) {
-            vscode.window.showErrorMessage(`Analysis failed: ${error}`);
-        }
-    });
+    // 所有交互由 WebView onFeedback 触发，不再注册独立命令（cycle/analyze等）
 
     // (Removed) AST round-trip debug command
     const astTestCommand = vscode.commands.registerCommand('matheye.testASTRoundTrip', async () => {
@@ -689,12 +651,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         startProofBuilderCommand,
         // insertHaveCmd,
-        // insertHaveAdmit,
-        // insertHaveDeny,
-        // insertHaveAdmitWithHistory,
-        // rollbackCurrentBlock,
-        cycleCursorModeCommand,
-        analyzeCommand,
+        // standalone commands removed; unified via WebView
         astTestCommand,
         onActiveEditorChange,
         onSelectionChange,
