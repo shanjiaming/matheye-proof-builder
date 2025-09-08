@@ -21,11 +21,7 @@
     "activationEvents": [
       "onStartupFinished",
       "onLanguage:lean4",
-      "onCommand:matheye.startProofBuilder",
-      "onCommand:matheye.insertHaveAdmit",
-      "onCommand:matheye.insertHaveDeny",
-      "onCommand:matheye.insertHaveSnippet",
-      "onCommand:matheye.analyzeProofGoals"
+      "onCommand:matheye.startProofBuilder"
     ],
   "main": "./out/extension.js",
   "contributes": {
@@ -98,66 +94,12 @@
         "command": "matheye.startProofBuilder",
         "title": "Start Proof Builder",
         "category": "MathEye"
-      },
-      {
-        "command": "matheye.insertHaveSnippet",
-        "title": "Insert Have Snippet (AST)",
-        "category": "MathEye"
-      },
-      {
-        "command": "matheye.insertHaveAdmit",
-        "title": "Insert Have (Admit)",
-        "category": "MathEye"
-      },
-      {
-        "command": "matheye.insertHaveDeny",
-        "title": "Insert Have (Deny)",
-        "category": "MathEye"
-      },
-      {
-        "command": "matheye.insertHaveAdmitWithHistory",
-        "title": "[Test] Insert Admit (Record History)",
-        "category": "MathEye"
-      },
-      {
-        "command": "matheye.rollbackCurrentBlock",
-        "title": "[Test] Rollback Current By Block",
-        "category": "MathEye"
-      },
-      {
-        "command": "matheye.analyzeProofGoals",
-        "title": "Analyze Proof Goals",
-        "category": "MathEye"
       }
     ],
     "menus": {
       "commandPalette": [
         {
           "command": "matheye.startProofBuilder",
-          "when": "editorLangId == lean4"
-        },
-        {
-          "command": "matheye.insertHaveSnippet",
-          "when": "editorLangId == lean4"
-        },
-        {
-          "command": "matheye.insertHaveAdmit",
-          "when": "editorLangId == lean4"
-        },
-          {
-            "command": "matheye.insertHaveDeny",
-            "when": "editorLangId == lean4"
-          },
-          {
-            "command": "matheye.insertHaveAdmitWithHistory",
-            "when": "editorLangId == lean4"
-          },
-          {
-            "command": "matheye.rollbackCurrentBlock",
-            "when": "editorLangId == lean4"
-          },
-        {
-          "command": "matheye.analyzeProofGoals",
           "when": "editorLangId == lean4"
         }
       ],
