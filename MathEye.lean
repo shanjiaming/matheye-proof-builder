@@ -906,8 +906,12 @@ def insertHaveByAction (params : InsertHaveByActionParams) : RequestM (RequestTa
       let mkIndented (indent : String) (s : String) : String :=
         let parts := s.splitOn "\n"
         parts.foldl (fun acc ln => if acc.isEmpty then indent ++ ln else acc ++ "\n" ++ indent ++ ln) ""
-      -- includeBy 由客户端的上下文判定控制（term 环境需要包 `by`），不在服务端做启发式推断
-      let includeBy := params.includeByOnSeq?.getD false
+      -- includeBy 规则：仅当目标确认为 tacticSeq 容器，才允许不包 `by`；
+      -- 否则强制包 `by`，以保证插入段位于战术语境（决不把战术投到 term）。
+      let includeBy :=
+        match targetStx with
+        | .node _ kind _ => if isTacticSeqKind kind then params.includeByOnSeq?.getD false else true
+        | _               => true
       let replacementSeg := if includeBy
         then s!"by\n{mkIndented baseIndent body}"
         else s!"\n{mkIndented baseIndent body}"

@@ -237,6 +237,18 @@ export class LeanClientService {
                 }
             };
             const result: any = await client.sendRequest("$/lean/rpc/call", rpcParams);
+            // TEST-MODE diagnostics: append a concise record of the RPC result
+            try {
+                if (process.env.MATHEYE_TEST_MODE === '1') {
+                    const p = require('path'); const fs = require('fs');
+                    const logPath = p.resolve(__dirname, '..', 'rpc_debug.log');
+                    const rg = result && result.range ? `[${result.range.start.line}:${result.range.start.character}-${result.range.stop.line}:${result.range.stop.character}]` : 'none';
+                    const parentKinds = Array.isArray(result?.parentKinds) ? JSON.stringify(result.parentKinds) : '[]';
+                    fs.appendFileSync(logPath,
+                        `[getByBlockRange] @ ${position.line}:${position.character} -> success=${!!(result && result.success)} range=${rg} syntax=${result?.syntaxKind} isTactic=${result?.isTacticContext} isTerm=${result?.isTermContext} isMatchAlt=${result?.isMatchAlt} parentKinds=${parentKinds}\n`
+                    );
+                }
+            } catch {}
             
             if (result && result.success) {
                 const rg = result.range;
@@ -255,6 +267,13 @@ export class LeanClientService {
             }
             return { success: false, errorMsg: result?.errorMsg || 'unknown error' };
         } catch (e: any) {
+            try {
+                if (process.env.MATHEYE_TEST_MODE === '1') {
+                    const p = require('path'); const fs = require('fs');
+                    const logPath = p.resolve(__dirname, '..', 'rpc_debug.log');
+                    fs.appendFileSync(logPath, `[getByBlockRange] @ ${position.line}:${position.character} -> error=${String(e)}\n`);
+                }
+            } catch {}
             return { success: false, errorMsg: String(e) };
         }
     }
