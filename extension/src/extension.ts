@@ -85,17 +85,18 @@ export function activate(context: vscode.ExtensionContext) {
     let positionLocked: boolean = false;
 
     // Register command: Insert have snippet via Lean RPC (AST-based)
-    const insertHaveCmd = vscode.commands.registerCommand('matheye.insertHaveSnippet', async () => {
-        const editor = vscode.window.activeTextEditor;
-        if (!editor) return;
-        if (!isTest && editor.document.languageId !== 'lean4') {
-            vscode.window.showWarningMessage('This command works with Lean 4 files only');
-            return;
-        }
-        vscode.window.showInformationMessage('Insert Have Snippet (free-form) 已禁用：请使用“Insert Have (Admit/Deny)”以保持 AST-only 精确编辑。');
-    });
+    // const insertHaveCmd = vscode.commands.registerCommand('matheye.insertHaveSnippet', async () => {
+    //     const editor = vscode.window.activeTextEditor;
+    //     if (!editor) return;
+    //     if (!isTest && editor.document.languageId !== 'lean4') {
+    //         vscode.window.showWarningMessage('This command works with Lean 4 files only');
+    //         return;
+    //     }
+    //     vscode.window.showInformationMessage('Insert Have Snippet (free-form) 已禁用：请使用“Insert Have (Admit/Deny)”以保持 AST-only 精确编辑。');
+    // });
 
     // Quick actions: Insert have by action (admit/deny) via server AST path
+    /*
     const insertHaveAdmit = vscode.commands.registerCommand('matheye.insertHaveAdmit', async () => {
         const editor = vscode.window.activeTextEditor; if (!editor) return;
         if (!isTest && editor.document.languageId !== 'lean4') return;
@@ -117,6 +118,7 @@ export function activate(context: vscode.ExtensionContext) {
         try {
             // 重试等待 by/战术容器可用，避免刚载入时 infoTree 尚未就绪
             let br = await leanClient.getByBlockRange(pos, editor.document);
+            logInfo(`[DEBUG] getByBlockRange result: success=${br.success}, range=${br.range ? `[${br.range.start.line}:${br.range.start.character}-${br.range.end.line}:${br.range.end.character}]` : 'none'}, isTactic=${br.isTacticContext}, isTerm=${br.isTermContext}`);
             for (let i = 0; i < 20 && (!br.success || !br.range); i++) {
                 await new Promise(r => setTimeout(r, 150));
                 br = await leanClient.getByBlockRange(pos, editor.document);
@@ -324,6 +326,7 @@ export function activate(context: vscode.ExtensionContext) {
         const editor = vscode.window.activeTextEditor; if (!editor) return;
         await codeModifier.rollbackOperation(editor.document);
     });
+    */
 
     // Register command: Start Proof Builder
     let startProofBuilderCommand = vscode.commands.registerCommand('matheye.startProofBuilder', async () => {
@@ -685,11 +688,11 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(
         startProofBuilderCommand,
-        insertHaveCmd,
-        insertHaveAdmit,
-        insertHaveDeny,
-        insertHaveAdmitWithHistory,
-        rollbackCurrentBlock,
+        // insertHaveCmd,
+        // insertHaveAdmit,
+        // insertHaveDeny,
+        // insertHaveAdmitWithHistory,
+        // rollbackCurrentBlock,
         cycleCursorModeCommand,
         analyzeCommand,
         astTestCommand,
