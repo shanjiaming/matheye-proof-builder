@@ -1,13 +1,15 @@
 {"version": "1.1.0",
  "packagesDir": ".lake/packages",
  "packages":
- [{"type": "path",
+ [{"url": "https://github.com/leanprover-community/mathlib4",
+   "type": "git",
+   "subDir": null,
    "scope": "",
+   "rev": "c211948581bde9846a99e32d97a03f0d5307c31e",
    "name": "mathlib",
    "manifestFile": "lake-manifest.json",
+   "inputRev": "v4.20.0",
    "inherited": false,
-   "dir":
-   "/Users/sjm/miniconda3/lib/python3.13/site-packages/lean_interact/cache/tmp_projects/v4.20.0/da1210be658679d7172bc04a3004ec5d183702c1e1890268233e2755c5247945/.lake/packages/mathlib",
    "configFile": "lakefile.lean"},
   {"url": "https://github.com/leanprover-community/plausible",
    "type": "git",

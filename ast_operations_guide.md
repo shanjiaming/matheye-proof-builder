@@ -239,3 +239,4 @@ def debugRange (stx : Syntax) : String :=
 
 这个AST操作机制是MathEye能够实现精确、安全证明编辑的核心。通过直接操作语法树而不是文本字符串，MathEye确保了编辑操作的可靠性和正确性。
 
+

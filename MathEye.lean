@@ -1,14 +1,60 @@
 import Lean
 import Lean.Meta.Basic
 import Lean.Elab.Tactic
+import Lean.Elab.Tactic.Basic
+import Lean.Parser.Tactic
 import Lean.Server.Rpc.Basic
 import Lean.PrettyPrinter
+import Init.Tactics
 
 open Lean Elab Meta Server RequestM Parser
+open Lean.Elab
 
 namespace MathEye
 
+/-- Build tag for integration verification (no-probe, AST-only). -/
+def buildTag : String := "NO_PROBE_VER_1"
+
 def VERSION := 1
+
+/-- 附加写日志（避免覆盖） -/
+private def appendLog (p : System.FilePath) (msg : String) : IO Unit := do
+  let dbg ← IO.getEnv "MATHEYE_DEBUG_AST"
+  if dbg.isSome then
+    IO.FS.withFile p .append fun h => h.putStr msg
+  else
+    pure ()
+
+private def writeFileIfDebug (p : System.FilePath) (msg : String) : IO Unit := do
+  let dbg ← IO.getEnv "MATHEYE_DEBUG_AST"
+  if dbg.isSome then IO.FS.writeFile p msg else pure ()
+
+-- 受环境变量控制的调试输出（默认不输出）
+def dbgIf (msg : String) : RequestM Unit := do
+  let dbg ← IO.getEnv "MATHEYE_DEBUG_AST"
+  if dbg.isSome then dbg_trace msg else pure ()
+
+/-- InfoTree 辅助：在给定位置收集语法路径（从外到内） -/
+private def stxContains (stx : Syntax) (pos : String.Pos) : Bool :=
+  match stx.getRange? with
+  | some rg => decide (rg.start ≤ pos ∧ pos ≤ rg.stop)
+  | none    => false
+
+private partial def collectSyntaxPathAt (tree : InfoTree) (pos : String.Pos) (acc : List Syntax := []) : List Syntax :=
+  match tree with
+  | InfoTree.context _ t => collectSyntaxPathAt t pos acc
+  | InfoTree.node i cs   =>
+    let acc' := match i.toElabInfo? with
+      | some ei => if stxContains ei.stx pos then acc ++ [ei.stx] else acc
+      | none    => acc
+    cs.toList.foldl (fun a t' => collectSyntaxPathAt t' pos a) acc'
+  | InfoTree.hole _      => acc
+
+private def isRelevantNode (s : Syntax) : Bool :=
+  let k := s.getKind
+  let ks := k.toString
+  ks.startsWith "Lean.Parser.Tactic" || k == `Lean.Parser.Term.byTactic ||
+  ks.startsWith "Lean.Parser.Term.calc" || ks.startsWith "Lean.Parser.Term.matchAlt"
 
 /-- Input parameters for RPC method -/
 structure InputParams where
@@ -66,22 +112,8 @@ def getProofGoals (params : InputParams) : RequestM (RequestTask OutputParams) :
 
     -- Use infoTree.goalsAt? to find tactic info at position
     let results0 := snap.infoTree.goalsAt? text hoverPos
-    -- Seam-probe near the position if empty
-    let results :=
-      if results0.isEmpty then
-        let baseLsp := params.pos
-        let probeRight : List Lsp.Position := (List.range 41).map (fun i => { line := baseLsp.line, character := baseLsp.character + i })
-        let probeLeft  : List Lsp.Position := (List.range 4).map (fun i => { line := baseLsp.line, character := baseLsp.character - i })
-        let probes := probeLeft ++ probeRight
-        let rec firstSome (ps : List Lsp.Position) : List GoalsAtResult :=
-          match ps with
-          | [] => results0
-          | p :: ps' =>
-            let pos := text.lspPosToUtf8Pos p
-            let rs := snap.infoTree.goalsAt? text pos
-            if rs.isEmpty then firstSome ps' else rs
-        firstSome probes
-      else results0
+    -- 无探针：直接使用当前点的结果
+    let results := results0
     match results.head? with
     | some result =>
       let names := result.tacticInfo.goalsBefore.map (fun g => toString g.name)
@@ -99,35 +131,25 @@ def getInsertionPoint (params : InputParams) : RequestM (RequestTask InsertionPo
     let doc ← readDoc
     let text : FileMap := doc.meta.text
     let hoverPos : String.Pos := text.lspPosToUtf8Pos params.pos
-    -- Robust: probe a small window around the hover position to avoid seam positions
     let results0 := snap.infoTree.goalsAt? text hoverPos
-    let results :=
-      if results0.isEmpty then
-        let baseLsp := params.pos
-        let probeRight : List Lsp.Position := (List.range 41).map (fun i => { line := baseLsp.line, character := baseLsp.character + i })
-        let probeLeft  : List Lsp.Position := (List.range 4).map (fun i => { line := baseLsp.line, character := baseLsp.character - i })
-        let probes := probeLeft ++ probeRight
-        let rec firstSome (ps : List Lsp.Position) : List GoalsAtResult :=
-          match ps with
-          | [] => results0
-          | p :: ps' =>
-            let pos := text.lspPosToUtf8Pos p
-            let rs := snap.infoTree.goalsAt? text pos
-            if rs.isEmpty then firstSome ps' else rs
-        firstSome probes
-      else results0
+    let results := results0
     match results.head? with
     | some r =>
-      -- Choose a stable position inside the tactic node (not after it),
-      -- to ensure goalsAt? continues to work and seams are avoided.
+      -- 以“当前战术节点”为锚，尽量保留用户实际光标的相对位置，仅在边界时做最小偏移，避免落在 seam。
       let stx := r.tacticInfo.stx
-      let posInside? :=
-        match stx.getTailPos?, stx.getPos? with
-        | some tail, _ =>
-          if tail.byteIdx > 0 then some (String.Pos.mk (tail.byteIdx - 1)) else stx.getPos?
-        | none, some start => some (String.Pos.mk (start.byteIdx + 1))
-        | none, none => none
-      let inside := posInside?.getD hoverPos
+      let inside := Id.run do
+        match stx.getRange? with
+        | some rg =>
+          let start := rg.start.byteIdx
+          let stop  := rg.stop.byteIdx
+          let cur   := hoverPos.byteIdx
+          if cur ≤ start then
+            String.Pos.mk (start + 1)
+          else if cur ≥ stop then
+            String.Pos.mk (if stop > start then stop - 1 else start + 1)
+          else
+            hoverPos
+        | none => hoverPos
       let insideLsp := text.utf8PosToLspPos inside
       return { pos := insideLsp }
     | none =>
@@ -175,23 +197,8 @@ def getStructuredContext (params : InputParams) : RequestM (RequestTask Structur
     let doc ← readDoc
     let text : FileMap := doc.meta.text
     let hoverPos : String.Pos := text.lspPosToUtf8Pos params.pos
-    -- Robust probe around hover to avoid seam positions
-    let results :=
-      let rs0 := snap.infoTree.goalsAt? text hoverPos
-      if rs0.isEmpty then
-        let baseLsp := params.pos
-        let probeRight : List Lsp.Position := (List.range 41).map (fun i => { line := baseLsp.line, character := baseLsp.character + i })
-        let probeLeft  : List Lsp.Position := (List.range 4).map (fun i => { line := baseLsp.line, character := baseLsp.character - i })
-        let probes := probeLeft ++ probeRight
-        let rec firstSome (ps : List Lsp.Position) : List GoalsAtResult :=
-          match ps with
-          | [] => rs0
-          | p :: ps' =>
-            let pos := text.lspPosToUtf8Pos p
-            let rs := snap.infoTree.goalsAt? text pos
-            if rs.isEmpty then firstSome ps' else rs
-        firstSome probes
-      else rs0
+    -- 不做探针：仅取 hoverPos 的结果（结构上下文不做额外回退）
+    let results := snap.infoTree.goalsAt? text hoverPos
     match results.head? with
     | some r =>
       let stx := r.tacticInfo.stx
@@ -206,9 +213,18 @@ def getStructuredContext (params : InputParams) : RequestM (RequestTask Structur
         let some g := r.tacticInfo.goalsAfter.head? <|> r.tacticInfo.goalsBefore.head?
           | return none
         let ty ← instantiateMVars (← g.getType)
-        let pretty ← ppExpr ty
-        let fvars := (← ty.collectFVars.run {}).2.fvarIds.map (·.name.toString)
-        return some { pretty := pretty.pretty, freeVars := fvars }
+
+        -- 用 g.withContext 确保上下文里有 fvar 的命名信息
+        let pretty ← g.withContext do
+          Meta.ppExpr ty
+
+        -- 收集自由变量，并映射到 userName
+        let (_, fvars) ← ty.collectFVars.run {}
+        let freeVars ← fvars.fvarIds.mapM fun fvarId => do
+          let decl ← fvarId.getDecl
+          pure decl.userName.toString
+
+        return some { pretty := pretty.pretty, freeVars := freeVars }
       -- locals
       let locals ← ctxInfo.runMetaM {} do
         let lctx ← getLCtx
@@ -231,263 +247,7 @@ def getStructuredContext (params : InputParams) : RequestM (RequestTask Structur
     | none =>
       return {}
 
-/-!
-  Dev-only AST DTO helpers (not used in production RPC).
-  保留给外部 round-trip 工具使用；生产路径不调用。
--/
--- DEV-ONLY DTOs and helpers re-enabled for round-trip tooling (non-RPC)
-structure SyntaxNodeDto where
-  kind : String
-  range? : Option RangeDto := none
-  children : Array SyntaxNodeDto := #[]
-  value? : Option String := none
-  leading? : Option String := none
-  trailing? : Option String := none
-  pos? : Option Nat := none
-  endPos? : Option Nat := none
-  deriving FromJson, ToJson, Inhabited
-
--- (duplicate removed) see definition above at line ~207
-
-def syntaxToDto (text : FileMap) : Syntax → SyntaxNodeDto
-  | .missing => { kind := "missing" }
-  | .node info kind args =>
-    let range? := info.getRange?.map (toRangeDto text)
-    { kind := kind.toString, range?, children := args.map (syntaxToDto text) }
-  | .atom info val =>
-    let range? := info.getRange?.map (toRangeDto text)
-    { kind := "atom", range?, value? := some val }
-  | .ident info _ val _ =>
-    let range? := info.getRange?.map (toRangeDto text)
-    { kind := "ident", range?, value? := some val.toString }
-
--- Minimal, deterministic formatter over Syntax (no string heuristics)
-def formatSyntaxCustom (stx : Syntax) : String :=
-  let rec go : Syntax → String
-    | .missing => ""
-    | .atom _ v => v
-    | .ident _ _ v _ => v.toString
-    | .node _ _ args =>
-      let parts := args.map go
-      parts.foldl (· ++ ·) ""
-  go stx
-
--- DTO → Syntax (structural, spacing fields are ignored by construction)
-def dtoToSyntax_export : SyntaxNodeDto → Syntax
-  | { kind := "missing", .. } => .missing
-  | { kind := "atom", value? := some v, .. } =>
-    let info := SourceInfo.synthetic (pos := ⟨0⟩) (endPos := ⟨0⟩) (canonical := true)
-    .atom info v
-  | { kind := "ident", value? := some v, .. } =>
-    let name : Name := v.split (· == '.') |>.foldl Name.mkStr Name.anonymous
-    let info := SourceInfo.synthetic (pos := ⟨0⟩) (endPos := ⟨0⟩) (canonical := false)
-    .ident info v.toSubstring name []
-  | { kind, children, .. } =>
-    let k := kind.split (· == '.') |>.foldl Name.mkStr Name.anonymous
-    let args := children.map dtoToSyntax_export
-    let info := SourceInfo.synthetic (pos := ⟨0⟩) (endPos := ⟨0⟩) (canonical := false)
-    .node info k args
-
 --
--- DEPRECATED/DEV-ONLY: AST 快照调试，不用于生产；不导出为 RPC
-def getASTAtPosition (params : InputParams) : RequestM (RequestTask SyntaxNodeDto) := do
-  withWaitFindSnapAtPos params.pos fun snap => do
-    let doc ← readDoc
-    let text : FileMap := doc.meta.text
-    let hoverPos : String.Pos := text.lspPosToUtf8Pos params.pos
-
-    -- First try tactic info (most reliable for our use case)
-    -- Probe around hover to capture inline tactics like `rfl` in `:= by rfl`
-    let results :=
-      let rs0 := snap.infoTree.goalsAt? text hoverPos
-      if rs0.isEmpty then
-        let baseLsp := params.pos
-        let probeRight : List Lsp.Position := (List.range 41).map (fun i => { line := baseLsp.line, character := baseLsp.character + i })
-        let probeLeft  : List Lsp.Position := (List.range 4).map (fun i => { line := baseLsp.line, character := baseLsp.character - i })
-        let probes := probeLeft ++ probeRight
-        let rec firstSome (ps : List Lsp.Position) : List GoalsAtResult :=
-          match ps with
-          | [] => rs0
-          | p :: ps' =>
-            let pos := text.lspPosToUtf8Pos p
-            let rs := snap.infoTree.goalsAt? text pos
-            if rs.isEmpty then firstSome ps' else rs
-        firstSome probes
-      else rs0
-    match results.head? with
-    | some r =>
-      let stx := r.tacticInfo.stx
-      return syntaxToDto text stx
-    | none =>
-      -- If no tactic info, fall back to basic approach
-      return { kind := "no_tactic_found" }
-
--- No longer needed since we fixed the root cause in AST construction
-def fixLineSpacing (line : String) : String := line
-
--- Post-processing function (currently unused as we fixed the AST issue)
-def fixPrettyPrinterSpacing (text : String) : String :=
-  -- No longer needed since we fixed the root cause in AST construction
-  text
-
--- REMOVED: Old manual formatting functions replaced by Lean native PrettyPrinter
-
-/- DEPRECATED/DEV-ONLY: AST 修复占位，不用于生产 -/
-def fixAstStructure (kindName : Name) (args : Array Syntax) : Array Syntax :=
-  -- 暂时只返回原始参数，将来扩展修复逻辑
-  args
-
-/- DEPRECATED/DEV-ONLY: DTO→Syntax 仅用于回环测试 -/
-def dtoToSyntax_dev1 : SyntaxNodeDto → Syntax
-  | { kind := "missing", .. } => .missing
-  | { kind := "atom", value? := some val, leading?, trailing?, pos?, endPos?, .. } =>
-    -- 特殊处理：人工插入的换行符
-    if val == "\n" then
-      let syntheticInfo := SourceInfo.synthetic (pos := ⟨0⟩) (endPos := ⟨1⟩) (canonical := true)
-      .atom syntheticInfo val
-    else if val.startsWith "«" && val.endsWith "»" then
-      -- 通用规则：被引号包裹的标识符按ident处理，避免无意义的引号
-      let core := (val.drop 1).dropRight 1
-      let substr := core.toSubstring
-      let name : Name := core.split (· == '.') |>.foldl Name.mkStr Name.anonymous
-      match leading?, trailing? with
-      | some leading, some trailing =>
-        if leading.trim.isEmpty && trailing.trim.isEmpty then
-          let leadingSubstr := leading.toSubstring
-          let trailingSubstr := trailing.toSubstring
-          let startPos : String.Pos := ⟨0⟩
-          let endPos : String.Pos := ⟨0⟩
-          let originalInfo := SourceInfo.original leadingSubstr startPos trailingSubstr endPos
-          .ident originalInfo substr name []
-        else
-          let syntheticInfo := SourceInfo.synthetic (pos := ⟨0⟩) (endPos := ⟨0⟩) (canonical := false)
-          .ident syntheticInfo substr name []
-      | _, _ =>
-        let syntheticInfo := SourceInfo.synthetic (pos := ⟨0⟩) (endPos := ⟨0⟩) (canonical := false)
-        .ident syntheticInfo substr name []
-    else
-      -- 正常的atom处理
-      match leading?, trailing? with
-      | some leading, some trailing =>
-        let leadingSubstr := leading.toSubstring
-        let trailingSubstr := trailing.toSubstring
-        let originalInfo := SourceInfo.original leadingSubstr ⟨0⟩ trailingSubstr ⟨0⟩
-        .atom originalInfo val
-      | _, _ =>
-        let syntheticInfo := SourceInfo.synthetic (pos := ⟨0⟩) (endPos := ⟨0⟩) (canonical := true)
-        .atom syntheticInfo val
-  | { kind := "ident", value? := some val, leading?, trailing?, pos?, endPos?, .. } =>
-    -- 对ident：忽略pos/endPos；仅在leading/trailing是纯空白时用original承载空白，否则synthetic
-    let substr := val.toSubstring
-    let name : Name := val.split (· == '.') |>.foldl Name.mkStr Name.anonymous
-    match leading?, trailing? with
-    | some leading, some trailing =>
-      if leading.trim.isEmpty && trailing.trim.isEmpty then
-        let leadingSubstr := leading.toSubstring
-        let trailingSubstr := trailing.toSubstring
-        let originalInfo := SourceInfo.original leadingSubstr ⟨0⟩ trailingSubstr ⟨0⟩
-        .ident originalInfo substr name []
-      else
-        let syntheticInfo := SourceInfo.synthetic (pos := ⟨0⟩) (endPos := ⟨0⟩) (canonical := false)
-        .ident syntheticInfo substr name []
-    | _, _ =>
-      let syntheticInfo := SourceInfo.synthetic (pos := ⟨0⟩) (endPos := ⟨0⟩) (canonical := false)
-      .ident syntheticInfo substr name []
-  | { kind, children, leading?, trailing?, pos?, endPos?, .. } =>
-    -- Parse the kind string back to Name
-    let kindName := kind.split (· == '.') |>.foldl Name.mkStr Name.anonymous
-    let args := children.map dtoToSyntax_dev1
-
-    -- AST层面修复：处理特殊情况
-    let fixedArgs := fixAstStructure kindName args
-
-    -- 对node也使用原始SourceInfo
-    match leading?, trailing? with
-    | some leading, some trailing =>
-      let leadingSubstr := leading.toSubstring
-      let trailingSubstr := trailing.toSubstring
-      let originalInfo := SourceInfo.original leadingSubstr ⟨0⟩ trailingSubstr ⟨0⟩
-      .node originalInfo kindName fixedArgs
-    | _, _ =>
-      let syntheticInfo := SourceInfo.synthetic (pos := ⟨0⟩) (endPos := ⟨0⟩) (canonical := false)
-      .node syntheticInfo kindName fixedArgs
-
-/- DEPRECATED/DEV-ONLY -/
-structure TextConversionParams where
-  syntaxData : SyntaxNodeDto
-  deriving FromJson, ToJson
-
-/- DEPRECATED/DEV-ONLY: 不导出为 RPC -/
-def formatASTToText (params : TextConversionParams) : RequestM (RequestTask TextConversionResult) := do
-  RequestM.asTask do
-    let stx := dtoToSyntax_dev1 params.syntaxData
-    let text := formatSyntaxCustom stx
-    return { text := text, success := true }
-
--- Test round-trip conversion: position -> AST -> text -> verify
-/- DEPRECATED/DEV-ONLY -/
-structure RoundTripTestParams where
-  pos : Lsp.Position
-  deriving FromJson, ToJson
-
-/- DEPRECATED/DEV-ONLY -/
-structure RoundTripTestResult where
-  originalSyntax : String
-  convertedText : String
-  success : Bool
-  errorMsg : Option String := none
-  deriving FromJson, ToJson
-
-/- DEPRECATED/DEV-ONLY: 不导出为 RPC -/
-def testRoundTripConversion (params : RoundTripTestParams) : RequestM (RequestTask RoundTripTestResult) := do
-  withWaitFindSnapAtPos params.pos fun snap => do
-    let doc ← readDoc
-    let text : FileMap := doc.meta.text
-    let hoverPos : String.Pos := text.lspPosToUtf8Pos params.pos
-
-    -- Step 1: Get AST at position (use same logic as getASTAtPosition)
-    -- Robust probe around hover to avoid seam positions
-    let results :=
-      let rs0 := snap.infoTree.goalsAt? text hoverPos
-      if rs0.isEmpty then
-        let baseLsp := params.pos
-        let probeRight : List Lsp.Position := (List.range 41).map (fun i => { line := baseLsp.line, character := baseLsp.character + i })
-        let probeLeft  : List Lsp.Position := (List.range 4).map (fun i => { line := baseLsp.line, character := baseLsp.character - i })
-        let probes := probeLeft ++ probeRight
-        let rec firstSome (ps : List Lsp.Position) : List GoalsAtResult :=
-          match ps with
-          | [] => rs0
-          | p :: ps' =>
-            let pos := text.lspPosToUtf8Pos p
-            let rs := snap.infoTree.goalsAt? text pos
-            if rs.isEmpty then firstSome ps' else rs
-        firstSome probes
-      else rs0
-    match results.head? with
-    | some r =>
-      let originalStx := r.tacticInfo.stx
-      -- Step 2: Convert to DTO
-      let dto := syntaxToDto text originalStx
-
-      -- Step 3: Convert DTO back to Syntax (without original positions)
-      let reconstructedStx := dtoToSyntax_dev1 dto
-
-      -- Step 4: Format both for comparison
-      let originalText := formatSyntaxCustom originalStx
-      let convertedText := formatSyntaxCustom reconstructedStx
-
-      return {
-        originalSyntax := originalText,
-        convertedText := convertedText,
-        success := true
-      }
-    | none =>
-      return {
-        originalSyntax := "",
-        convertedText := "",
-        success := false,
-        errorMsg := some "No syntax found at position"
-      }
 
 
 /-- Insert a have statement at the end of the tactic sequence -/
@@ -495,28 +255,7 @@ def testRoundTripConversion (params : RoundTripTestParams) : RequestM (RequestTa
 def RangeDto.fromStringRange (text : FileMap) (range : String.Range) : RangeDto :=
   toRangeDto text range
 
-/- DEPRECATED/LEGACY: 旧的序列末尾插入原型，不用于生产 -/
-def insertHaveStatement (originalStx : Syntax) (haveStmt : Syntax) : Syntax :=
-  match originalStx with
-  | .node info kind args =>
-    -- For a tactic sequence, we want to add the have statement to the end
-    let newArgs := args.push haveStmt
-    .node info kind newArgs
-  | _ => originalStx  -- If it's not a node, just return the original
-
-/- DEPRECATED/LEGACY: 旧接口，不用于生产 -/
-structure InsertHaveParams where
-  pos : Lsp.Position
-  haveStatement : String  -- The have statement as a string
-  deriving FromJson, ToJson
-
-/- DEPRECATED/LEGACY -/
-structure InsertHaveResult where
-  newText : String
-  range   : RangeDto
-  success : Bool
-  errorMsg : Option String := none
-  deriving FromJson, ToJson
+-- （已移除）旧的序列末尾插入/参数结构；生产路径统一走 insertHaveByAction
 
 def parseTacticSnippet (env : Environment) (s : String) : Except String Syntax :=
   -- Parse a single tactic snippet using Lean's parser category
@@ -530,95 +269,299 @@ def splitTacticSegments (s : String) : List String :=
 def parseTacticSegments (env : Environment) (s : String) : List Syntax :=
   (splitTacticSegments s).foldl (fun acc seg =>
     match parseTacticSnippet env seg with
-    | .ok stx  => acc ++ [stx]
-    | .error _ => acc) []
+    | .ok stx => acc ++ [stx]
+    | .error _ =>
+      let fallbackStx := Syntax.atom SourceInfo.none seg
+      acc ++ [fallbackStx]) []
 
-/- DEPRECATED/DEV-ONLY: 未在生产路径使用 -/
-def parseTacticSeq (env : Environment) (s : String) : Except String Syntax :=
-  Parser.runParserCategory env `tacticSeq1Indented s
+-- （已移除）旧的 parseTacticSeq 原型；使用 parseTacticSegments + buildIndentedSeq
 
-def formatTacticSeq (stx : Syntax) : MetaM String := do
-  -- Use Lean's native PrettyPrinter instead of manual formatting
-  let isSeqKind (k : Name) : Bool :=
-    k == `Lean.Parser.Tactic.tacticSeq ||
-    k == `Lean.Parser.Tactic.tacticSeq1Indented ||
-    k == `Lean.Parser.Tactic.tacticSeqBracketed
+/--
+formatTacticSeq 设计说明：
 
-  match stx with
-  | .node _ kind _ =>
-    -- Determine the correct category based on the syntax kind
-    let category := if isSeqKind kind then `tacticSeq else `tactic
-    -- Use Lean's native formatting
-    let fmt ← PrettyPrinter.ppCategory category stx
-    return fmt.pretty
-  | _ =>
-    -- For non-node syntax, use tactic category
-    let fmt ← PrettyPrinter.ppCategory `tactic stx
-    return fmt.pretty
+我们需要把“保留的前缀战术 + 新插入的 have/exact”组装为一个战术序列并整段 pretty print。
+直接用程序拼出来的 `tacticSeq1Indented` 语法树去走 `PrettyPrinter.ppCategory` 的 `tacticSeq` 路径，
+在某些版本/环境下会触发“unknown constant 'exact'”类异常。这不是 `exact` 缺失，而是 pretty printer 在
+`tacticSeq` 路径上对由代码组装的序列节点（SourceInfo、分隔/布局等）存在内部不变式要求；未满足时会异常。
 
-/-- Keep only tactics whose range ends at or before the given position. Best-effort without relying on specific kinds. -/
-/- DEPRECATED/LEGACY: 旧裁剪策略，不用于生产 -/
-def trimTacticSequenceAt (stx : Syntax) (pos : String.Pos) : Syntax :=
-  let isSeqKind (k : Name) : Bool :=
-    k == `Lean.Parser.Tactic.tacticSeq ||
-    k == `Lean.Parser.Tactic.tacticSeq1Indented ||
-    k == `Lean.Parser.Tactic.tacticSeqBracketed
-  let mkEmptySeq : Syntax :=
-    let info := SourceInfo.synthetic (pos := ⟨0⟩) (endPos := ⟨0⟩) (canonical := true)
-    Syntax.node info `Lean.Parser.Tactic.tacticSeq1Indented #[]
-  match stx with
-  | .node info kind args =>
-    if isSeqKind kind then
-      -- Keep only tactics that end at or before the cursor
-      let kept := args.filter (fun a =>
-        match a.getRange? with
-        | some r => r.stop ≤ pos
-        | none   => true)
-      .node info kind kept
-    else
-      -- Not a sequence: wrap-or-drop the single tactic based on its end position
-      match stx.getRange? with
-      | some r =>
-        if r.stop ≤ pos then
-          -- Tactic ends before cursor: keep it by wrapping into a single-item sequence
-          Syntax.node info `Lean.Parser.Tactic.tacticSeq1Indented #[stx]
-        else
-          -- Tactic extends beyond cursor: drop it by returning an empty sequence
-          mkEmptySeq
-      | none => mkEmptySeq
-  | s =>
-    -- Atom/ident/missing: treat as a single tactic and apply the same keep/drop rule
-    match s.getRange? with
-    | some r => if r.stop ≤ pos then
-                  Syntax.node (SourceInfo.synthetic (pos := ⟨0⟩) (endPos := ⟨0⟩) (canonical := true)) `Lean.Parser.Tactic.tacticSeq1Indented #[s]
-                else mkEmptySeq
-    | none => mkEmptySeq
+为保持 AST 驱动又满足 pretty printer 的契约，我们采用：
+- 首选尝试整段 `tacticSeq` pretty print；
+- 若失败，则对子战术逐个以 `tactic` 类别 pretty print 得文本，再交由 parser 解析为标准的
+  `tacticSeq1Indented` 语法树，最后再次整段 pretty print。该过程是“正形化”序列结构，不是字符串级编辑落地。
+- 任一步失败，明确返回失败并落盘详细调试信息，保证可复现、可诊断。
+-/
 
-/-!- Unified sequence editing helpers -/
+-- 统一判断 tactic 序列种类
 def isTacticSeqKind (k : Name) : Bool :=
   k == `Lean.Parser.Tactic.tacticSeq ||
   k == `Lean.Parser.Tactic.tacticSeq1Indented ||
   k == `Lean.Parser.Tactic.tacticSeqBracketed
+
+def formatTacticSeq (stx : Syntax) : MetaM String := do
+  -- 首选整段 pretty；失败时逐子战术 pretty 后再拼接（仍无字符串编辑逻辑）。
+  match stx with
+  | .node _ kind args =>
+    if isTacticSeqKind kind then
+      try
+        let fmt ← PrettyPrinter.ppCategory `tacticSeq stx
+        return fmt.pretty
+      catch _ =>
+        let parts ← (args.toList.mapM (fun a => do
+          let fmt ← PrettyPrinter.ppCategory `tactic a
+          pure fmt.pretty))
+        return String.intercalate "\n" parts
+    else
+      let fmt ← PrettyPrinter.ppCategory `tactic stx
+      return fmt.pretty
+  | _ =>
+    let fmt ← PrettyPrinter.ppCategory `tactic stx
+    return fmt.pretty
 
 def flattenTacticSeqArgs (stx : Syntax) : Array Syntax :=
   match stx with
   | .node _ kind args => if isTacticSeqKind kind then args else #[stx]
   | s => #[s]
 
+/-! 从语法路径中选择最近的 tacticSeq（范围最小者）。 -/
+private def pickNearestTacticSeqInPath (xs : List Syntax) : Option Syntax :=
+  let cands := xs.filter (fun s => isTacticSeqKind s.getKind)
+  match cands with
+  | [] => none
+  | c :: cs =>
+    let pick (a b : Syntax) : Syntax :=
+      match a.getRange?, b.getRange? with
+      | some ra, some rb =>
+        let la := ra.stop.byteIdx - ra.start.byteIdx
+        let lb := rb.stop.byteIdx - rb.start.byteIdx
+        if lb < la then b else a
+      | _, _ => a
+    some (cs.foldl pick c)
+
 def buildIndentedSeq (args : Array Syntax) : Syntax :=
   let info := SourceInfo.synthetic (pos := ⟨0⟩) (endPos := ⟨0⟩) (canonical := true)
   Syntax.node info `Lean.Parser.Tactic.tacticSeq1Indented args
+
+-- 统一的按行缩进工具：对 s 的每一行前加上 indent，并用 \n 连接
+def indentLines (indent : String) (s : String) : String :=
+  let parts := s.splitOn "\n"
+  parts.foldl (fun acc ln => if acc.isEmpty then indent ++ ln else acc ++ "\n" ++ indent ++ ln) ""
+
+-- 将 UTF-8 位置 clamp 到给定 LSP 范围内部（首尾各偏移 1，以避免落在 token seam 上）
+def clampUtf8Into (text : FileMap) (rr : RangeDto) (pos : String.Pos) : String.Pos :=
+  let lo0 := text.lspPosToUtf8Pos rr.start
+  let hi0 := text.lspPosToUtf8Pos rr.stop
+  let lo := if lo0.byteIdx + 1 < hi0.byteIdx then ⟨lo0.byteIdx + 1⟩ else lo0
+  let hi := if hi0.byteIdx > lo0.byteIdx + 1 then ⟨hi0.byteIdx - 1⟩ else hi0
+  if pos.byteIdx < lo.byteIdx then lo else if pos.byteIdx > hi.byteIdx then hi else pos
+
+-- 构造常用范围
+def mkRangeDtoLsp (st : Lsp.Position) (en : Lsp.Position) : RangeDto :=
+  { start := st, stop := en }
+
+def mkWholeFileRange (text : FileMap) : RangeDto :=
+  { start := { line := 0, character := 0 }, stop := text.utf8PosToLspPos text.source.endPos }
+
+def validLspRange (text : FileMap) (st en : Lsp.Position) : Bool :=
+  let s := text.lspPosToUtf8Pos st
+  let e := text.lspPosToUtf8Pos en
+  decide (e.byteIdx > s.byteIdx)
+
+-- includeBy 判定：命中 by 容器则必为 true；若容器是 tacticSeq，则由 includeByOnSeq? 决定；否则 false
+-- 生成替换片段：根据 includeBy 决定是否带 by 头
+def makeReplacementSeg (includeBy : Bool) (baseIndent : String) (body : String) : String :=
+  if includeBy then s!"by\n{indentLines baseIndent body}" else s!"\n{indentLines baseIndent body}"
+
+-- 将 replacementSeg 替换到 contRange 上，并返回整篇新文本与整篇范围
+def spliceWholeFile (text : FileMap) (contRange : RangeDto) (replacementSeg : String)
+  : (String × RangeDto) :=
+  let replaceStartUtf8 := text.lspPosToUtf8Pos contRange.start
+  let replaceStopUtf8  := text.lspPosToUtf8Pos contRange.stop
+  let src := text.source
+  let pre := src.extract ⟨0⟩ replaceStartUtf8
+  let suf := src.extract replaceStopUtf8 src.endPos
+  let newFull := pre ++ replacementSeg ++ suf
+  let fullRange := mkWholeFileRange text
+  (newFull, fullRange)
+
+-- 计算 by 容器的范围/选择容器：下文依赖 findTacticSeqChild/lastStopInSubtree，因此放在其后定义
+
+/-! 统一的子树工具：寻找 tacticSeq 子节点 与 求子树最右 stop -/
+private partial def findTacticSeqChild (s : Syntax) : Option Syntax :=
+  if isTacticSeqKind s.getKind then some s else
+  match s with
+  | .node _ _ args =>
+    let rec loop (i : Nat) : Option Syntax :=
+      if h : i < args.size then
+        match findTacticSeqChild (args[i]'h) with
+        | some t => some t
+        | none => loop (i+1)
+      else none
+    loop 0
+  | _ => none
+
+private partial def lastStopInSubtree (s : Syntax) : Option String.Pos :=
+  let cur := s.getRange? |>.map (·.stop)
+  match s with
+  | .node _ _ args =>
+    let rec loop (i : Nat) (best : Option String.Pos) : Option String.Pos :=
+      if h : i < args.size then
+        let child := args[i]'h
+        let best1 :=
+          match best, lastStopInSubtree child with
+          | some a, some b => if b.byteIdx > a.byteIdx then some b else some a
+          | none,   some b => some b
+          | some a, none   => some a
+          | none,   none   => none
+        loop (i+1) best1
+      else best
+    match loop 0 cur with
+    | some p => some p
+    | none   => cur
+  | _ => cur
+
+-- 计算 by 容器的范围：起点为 by.start，终点优先为其子 tacticSeq 的最右 stop，否则退回 by.tail 或 by.stop
+def byContainerStartStop (text : FileMap) (byC : Syntax) : Option (Lsp.Position × Lsp.Position) :=
+  let st? := byC.getRange? |>.map (fun rg => text.utf8PosToLspPos rg.start)
+  let child? := findTacticSeqChild byC
+  let en? : Option Lsp.Position :=
+    match child? with
+    | some seq =>
+      match lastStopInSubtree seq with
+      | some p => some (text.utf8PosToLspPos p)
+      | none   =>
+        match byC.getTailPos? with
+        | some q => some (text.utf8PosToLspPos q)
+        | none   =>
+          match byC.getRange? with
+          | some rg => some (text.utf8PosToLspPos rg.stop)
+          | none    => none
+    | none =>
+      match lastStopInSubtree byC with
+      | some p => some (text.utf8PosToLspPos p)
+      | none   =>
+        match byC.getTailPos? with
+        | some q => some (text.utf8PosToLspPos q)
+        | none   =>
+          match byC.getRange? with
+          | some rg => some (text.utf8PosToLspPos rg.stop)
+          | none    => none
+  match st?, en? with
+  | some st, some en => some (st, en)
+  | _, _ => none
+
+-- 根据 container 与 term 路径，优先选择覆盖 container 的最小 by 容器范围；否则退回 container 自身范围
+/-! 收集整棵 InfoTree 中的 `byTactic` 语法节点（AST-only） -/
+private partial def collectByNodes (tree : InfoTree) (acc : List Syntax := []) : List Syntax :=
+  match tree with
+  | InfoTree.context _ t => collectByNodes t acc
+  | InfoTree.node i cs   =>
+    let acc' := match i.toElabInfo? with
+      | some ei => if ei.stx.getKind == `Lean.Parser.Term.byTactic then acc ++ [ei.stx] else acc
+      | none    => acc
+    cs.toList.foldl (fun a t' => collectByNodes t' a) acc'
+  | InfoTree.hole _      => acc
+
+/-! 在一组 by 节点中，选择“最靠近 pos”的一个：
+    优先 start ≥ pos 的最小者；否则选 start < pos 的最大者。-/
+private def chooseNearestBy (bys : List Syntax) (pos : String.Pos) : Option Syntax :=
+  let withStart := bys.filterMap (fun s => s.getRange? |>.map (fun rg => (s, rg.start)))
+  let (afters, befores) := withStart.partition (fun (_, st) => decide (st.byteIdx ≥ pos.byteIdx))
+  let pickMin (xs : List (Syntax × String.Pos)) : Option Syntax :=
+    match xs with
+    | [] => none
+    | x :: xs =>
+      let rec goMin (best : Syntax × String.Pos) (ys : List (Syntax × String.Pos)) : Syntax × String.Pos :=
+        match ys with
+        | [] => best
+        | y :: ys' =>
+          if y.snd.byteIdx < best.snd.byteIdx then goMin y ys' else goMin best ys'
+      some (goMin x xs).fst
+  let pickMax (xs : List (Syntax × String.Pos)) : Option Syntax :=
+    match xs with
+    | [] => none
+    | x :: xs =>
+      let rec goMax (best : Syntax × String.Pos) (ys : List (Syntax × String.Pos)) : Syntax × String.Pos :=
+        match ys with
+        | [] => best
+        | y :: ys' =>
+          if y.snd.byteIdx > best.snd.byteIdx then goMax y ys' else goMax best ys'
+      some (goMax x xs).fst
+  match pickMin afters with
+  | some s => some s
+  | none   => pickMax befores
+
+/-! 在一组 term 路径节点中，选取“覆盖 target 的最小 byTactic 容器”。 -/
+private def pickEnclosingBy (termNodes : List Syntax) (target : Syntax) : Option Syntax :=
+  -- 优先：term 路径中所有包含光标位置的 by 容器（已由 collectSyntaxPathAt 保证包含 pos），选最小者
+  let byNodes := termNodes.filter (fun s => s.getKind == `Lean.Parser.Term.byTactic)
+  let chooseSmallest (xs : List Syntax) : Option Syntax :=
+    match xs with
+    | [] => none
+    | c :: cs =>
+      let pick (a b : Syntax) : Syntax :=
+        match a.getRange?, b.getRange? with
+        | some ra, some rb =>
+          let la := ra.stop.byteIdx - ra.start.byteIdx
+          let lb := rb.stop.byteIdx - rb.start.byteIdx
+          if la ≤ lb then a else b
+          | _, _ => a
+      some (cs.foldl pick c)
+  match chooseSmallest byNodes with
+  | some y => some y
+  | none   =>
+    -- 次选：by 容器完整覆盖 target 范围（最小者）
+    match target.getRange? with
+    | none => none
+    | some tr =>
+      let byCoverTarget := byNodes.filter (fun byC =>
+        match byC.getRange? with
+        | some br => decide (br.start.byteIdx ≤ tr.start.byteIdx ∧ tr.stop.byteIdx ≤ br.stop.byteIdx)
+        | none    => false)
+      chooseSmallest byCoverTarget
+
+-- includeBy 判定：命中 by 容器则必为 true；若容器是 tacticSeq，则由 includeByOnSeq? 决定；否则 false
+def includeByFor (stxsTerm : List Syntax) (targetStx : Syntax) (usedByContainer : Bool)
+  (includeByOnSeq? : Option Bool) : Bool :=
+  let hasByCont := (pickEnclosingBy stxsTerm targetStx).isSome || usedByContainer
+  if hasByCont then true else
+  match targetStx with
+  | .node _ kind _ => if isTacticSeqKind kind then includeByOnSeq?.getD false else false
+  | _               => false
+
+-- 根据 container 与 term 路径，优先选择覆盖 container 的最小 by 容器范围；否则退回 container 自身范围
+def containerEffectiveStartStop (text : FileMap) (stxsTerm : List Syntax) (container : Syntax)
+  : Option (Lsp.Position × Lsp.Position) :=
+  match pickEnclosingBy stxsTerm container with
+  | some byC => byContainerStartStop text byC
+  | none     =>
+    match container.getRange? with
+    | some rg => some (text.utf8PosToLspPos rg.start, text.utf8PosToLspPos rg.stop)
+    | none    => none
+
+-- 容器视图：范围 + 语法种类 + 是否 by 容器
+structure ContainerView where
+  start : Lsp.Position
+  stop  : Lsp.Position
+  kind  : Name
+  isBy  : Bool
+
+-- 生成 ContainerView：若 term 路径命中 by，则返回 by 的范围与种类；否则用 container 自身
+def containerView (text : FileMap) (stxsTerm : List Syntax) (container : Syntax) : Option ContainerView :=
+  match pickEnclosingBy stxsTerm container with
+  | some byC =>
+    match byContainerStartStop text byC with
+    | some (st, en) => some { start := st, stop := en, kind := byC.getKind, isBy := true }
+    | none          => none
+  | none =>
+    match container.getRange? with
+    | some rg => some { start := text.utf8PosToLspPos rg.start, stop := text.utf8PosToLspPos rg.stop, kind := container.getKind, isBy := false }
+    | none    => none
 
 /-!
   Shared helpers: choose the smallest enclosing tactic sequence container
   from a syntax path, falling back to the provided leaf if none is present.
 -/
 private def chooseSmallestTacticSeq (stxs : List Syntax) (fallback : Syntax) : Syntax :=
-  -- Find all tacticSeq kinds first
-  let isTacticSeqKind (k : Name) : Bool :=
-    k == `Lean.Parser.Tactic.tacticSeq ||
-    k == `Lean.Parser.Tactic.tacticSeq1Indented ||
-    k == `Lean.Parser.Tactic.tacticSeqBracketed
   let candidates := stxs.filter (fun s => isTacticSeqKind s.getKind)
   match candidates with
   | [] =>
@@ -647,78 +590,43 @@ private def chooseSmallestTacticSeq (stxs : List Syntax) (fallback : Syntax) : S
       | _, _ => a
     cs.foldl pick c
 
-@[server_rpc_method]
-def insertHaveAtPosition (params : InsertHaveParams) : RequestM (RequestTask InsertHaveResult) := do
-  withWaitFindSnapAtPos params.pos fun snap => do
-    let doc ← readDoc
-    let text : FileMap := doc.meta.text
-    let hoverPos : String.Pos := text.lspPosToUtf8Pos params.pos
+-- removed legacy insertHaveAtPosition; unified到 insertHaveByAction
 
-    -- Get the AST at the position
-    -- Robust probe around hover to avoid seam positions
-    let results :=
-      let rs0 := snap.infoTree.goalsAt? text hoverPos
-      if rs0.isEmpty then
-        let baseLsp := params.pos
-        let probeRight : List Lsp.Position := (List.range 41).map (fun i => { line := baseLsp.line, character := baseLsp.character + i })
-        let probeLeft  : List Lsp.Position := (List.range 4).map (fun i => { line := baseLsp.line, character := baseLsp.character - i })
-        let probes := probeLeft ++ probeRight
-        let rec firstSome (ps : List Lsp.Position) : List GoalsAtResult :=
-          match ps with
-          | [] => rs0
-          | p :: ps' =>
-            let pos := text.lspPosToUtf8Pos p
-            let rs := snap.infoTree.goalsAt? text pos
-            if rs.isEmpty then firstSome ps' else rs
-        firstSome probes
-      else rs0
-    match results.head? with
-    | some r0 =>
-      -- Prefer enclosing tactic-sequence container as edit target
-      let path := results
-      let stxs := path.map (fun rr => rr.tacticInfo.stx)
-      let isSeqKind (k : Name) : Bool :=
-        k == `Lean.Parser.Tactic.tacticSeq ||
-        k == `Lean.Parser.Tactic.tacticSeq1Indented ||
-        k == `Lean.Parser.Tactic.tacticSeqBracketed
-      let chooseContainer (xs : List Syntax) : Syntax :=
-        let candidates := xs.filter (fun s => isSeqKind s.getKind)
-        match candidates with
-        | []      => r0.tacticInfo.stx
-        | c :: cs =>
-          let pick (a b : Syntax) : Syntax :=
-            match a.getRange?, b.getRange? with
-            | some ra, some rb => if ra.stop.byteIdx - ra.start.byteIdx ≤ rb.stop.byteIdx - rb.start.byteIdx then a else b
-            | _, _ => a
-          cs.foldl pick c
-      let originalStx := chooseContainer stxs
-      let env := r0.ctxInfo.env
-      -- Flatten → filter by end ≤ pos → append parsed haveStatement tactics → rebuild sequence
-      let baseArgs := flattenTacticSeqArgs originalStx
-      let kept := baseArgs.filter (fun a => match a.getRange? with | some r => r.stop ≤ hoverPos | none => true)
-      let haveTactics := parseTacticSegments env params.haveStatement
-      let newArgs := kept ++ haveTactics.toArray
-      let newStx := buildIndentedSeq newArgs
-      let body ← r0.ctxInfo.runMetaM {} do
-        formatTacticSeq newStx
-      let range := (originalStx.getRange?).map (RangeDto.fromStringRange text)
-      let some r := range | return { newText := body, range := { start := params.pos, stop := params.pos }, success := true }
-      -- Compute indentation based on start column; if original was not a sequence, prefix 'by' and indent children by two spaces
-      -- Derive base indentation from client-anchored position (right after '=>')
-      let baseIndent := String.mk (List.replicate params.pos.character ' ')
-      let isSeq := isTacticSeqKind originalStx.getKind
-      let mkIndented (indent : String) (s : String) : String :=
-        let parts := s.splitOn "\n"
-        parts.foldl (fun acc ln => if acc.isEmpty then indent ++ ln else acc ++ "\n" ++ indent ++ ln) ""
-      let finalText := s!"\n{mkIndented (baseIndent ++ "  ") body}"
-      return { newText := finalText, range := r, success := true }
-    | none =>
-      return {
-        newText := "",
-        range := { start := params.pos, stop := params.pos },
-        success := false,
-        errorMsg := some "No syntax found at position"
-      }
+/-!
+  在术语/战术语法路径中寻找最小的分支容器：
+  - Lean.Parser.Tactic.matchRhs（tactic 侧分支右侧）
+  - Lean.Parser.Term.matchAlt（term 侧分支）
+  返回最小（range 最短）的一个。
+-/
+private def smallestMatchAltOrRhsInPath (xs : List Syntax) : Option Syntax :=
+  let candidates := xs.filter (fun s =>
+    let k := s.getKind
+    k == `Lean.Parser.Tactic.matchRhs || k == `Lean.Parser.Term.matchAlt)
+  match candidates with
+  | [] => none
+  | c :: cs =>
+    let pick (a b : Syntax) : Syntax :=
+      match a.getRange?, b.getRange? with
+      | some ra, some rb =>
+        let la := ra.stop.byteIdx - ra.start.byteIdx
+        let lb := rb.stop.byteIdx - rb.start.byteIdx
+        if la ≤ lb then a else b
+      | _, _ => a
+    some (cs.foldl pick c)
+
+/-! 递归寻找节点内部 `=>` atom 的“结束位置”；用于决定在分支头部 `=>` 之后插入。 -/
+private partial def findArrowAtomEndPos (s : Syntax) : Option String.Pos :=
+  match s with
+  | .atom info val => if val == "=>" then info.getRange?.map (·.stop) else none
+  | .node _ _ args =>
+    let rec loop (i : Nat) : Option String.Pos :=
+      if h : i < args.size then
+        match findArrowAtomEndPos (args[i]'h) with
+        | some p => some p
+        | none   => loop (i+1)
+      else none
+    loop 0
+  | _ => none
 
 structure InsertHaveByActionParams where
   pos    : Lsp.Position
@@ -733,35 +641,150 @@ structure InsertHaveByActionResult where
   range   : RangeDto
   success : Bool
   errorMsg : Option String := none
+  buildTag : String := MathEye.buildTag
   deriving FromJson, ToJson
 
 @[server_rpc_method]
 def insertHaveByAction (params : InsertHaveByActionParams) : RequestM (RequestTask InsertHaveByActionResult) := do
-  withWaitFindSnapAtPos params.pos fun snap => do
-    let doc ← readDoc
-    let text : FileMap := doc.meta.text
+  do dbgIf s!"[NO_PROBE] insertHaveByAction ENTRY pos={params.pos.line}:{params.pos.character} action='{params.action}'"
+  try
+    let _ ← appendLog "/tmp/insertHaveByAction_no_probe.log" s!"ENTRY {params.pos.line}:{params.pos.character}\n"
+  catch _ => pure ()
+  -- 为确保 InfoTree 完整，获取文件末尾位置的快照（而非依赖调用点）。
+  let doc ← readDoc
+  let text : FileMap := doc.meta.text
+  let src := text.source
+  let endLsp : Lsp.Position := text.utf8PosToLspPos src.endPos
+  withWaitFindSnapAtPos endLsp fun snap => do
     let hoverPos : String.Pos := text.lspPosToUtf8Pos params.pos
-    -- Robust probe around hover to avoid seam positions
-    let results :=
-      let rs0 := snap.infoTree.goalsAt? text hoverPos
-      if rs0.isEmpty then
-        let baseLsp := params.pos
-        let probeRight : List Lsp.Position := (List.range 41).map (fun i => { line := baseLsp.line, character := baseLsp.character + i })
-        let probeLeft  : List Lsp.Position := (List.range 4).map (fun i => { line := baseLsp.line, character := baseLsp.character - i })
-        let probes := probeLeft ++ probeRight
-        let rec firstSome (ps : List Lsp.Position) : List GoalsAtResult :=
-          match ps with
-          | [] => rs0
-          | p :: ps' =>
-            let pos := text.lspPosToUtf8Pos p
-            let rs := snap.infoTree.goalsAt? text pos
-            if rs.isEmpty then firstSome ps' else rs
-        firstSome probes
-      else rs0
+    -- 无探针：仅用 hoverPos 的结果
+    let results := snap.infoTree.goalsAt? text hoverPos
+    do dbgIf s!"[NO_PROBE] insertHaveByAction results kinds={results.map (fun r => r.tacticInfo.stx.getKind.toString)}"
+    try
+      let _ ← appendLog "/tmp/insertHaveByAction_no_probe.log" s!"KINDS {results.map (fun r => r.tacticInfo.stx.getKind.toString)}\n"
+    catch _ => pure ()
     match results.head? with
     | none =>
-      let rr0 := params.blockRange?.getD { start := params.pos, stop := params.pos }
-      return { newText := "", range := rr0, success := false, errorMsg := some "no tactic at pos" }
+      -- 位置不在战术节点上：在全文件 AST 中选择“距离最近的 by 容器”，并在其体内进行插入（AST-only，无回退）
+      let allBy := collectByNodes snap.infoTree []
+      try
+        let _ ← appendLog "/tmp/insertHaveByAction_no_probe.log" s!"ALL_BY_COUNT {allBy.length}\n"
+      catch _ => pure ()
+      match chooseNearestBy allBy hoverPos with
+      | none =>
+        let rr0 := params.blockRange?.getD { start := params.pos, stop := params.pos }
+        return { newText := "", range := rr0, success := false, errorMsg := some "no by container found" }
+      | some byC =>
+        -- 统一容器范围：by.start → 子 tacticSeq 最右叶 stop（若无子 seq，则用 byC 的 tail/range.stop）
+        let startStop? : Option (Lsp.Position × Lsp.Position) := byContainerStartStop text byC
+        let some (stLsp, enLsp) := startStop? | return {
+          newText := "", range := { start := params.pos, stop := params.pos }, success := false,
+          errorMsg := some "no range for by container" }
+        -- 夹取稳定锚点到 by 体内部
+        if not (validLspRange text stLsp enLsp) then
+          return { newText := "", range := { start := params.pos, stop := params.pos }, success := false,
+                   errorMsg := some "invalid by-block range" }
+        let rr0 : RangeDto := mkRangeDtoLsp stLsp enLsp
+        let stablePos := clampUtf8Into text rr0 hoverPos
+        let resultsStable := snap.infoTree.goalsAt? text stablePos
+        let some r := resultsStable.head? | return {
+          newText := "", range := mkRangeDtoLsp stLsp enLsp, success := false,
+          errorMsg := some "no goals in selected by container" }
+        let env := r.ctxInfo.env
+        let stxsTerm := (collectSyntaxPathAt snap.infoTree hoverPos []).filter isRelevantNode
+        -- 统一以“最近的 tacticSeq 祖先”为容器；如无则退回 byC 的 tacticSeq 子节点/自身
+        let targetStx := (pickNearestTacticSeqInPath stxsTerm).getD ((findTacticSeqChild byC).getD byC)
+        let baseArgs := flattenTacticSeqArgs targetStx
+        -- 以“包含 stablePos 的子战术”的尾部作为切割点（若无则用 stablePos，避免落在 token seam）
+        let (cutPosUtf8, strictAtCut) : (String.Pos × Bool) := Id.run do
+          let opt := baseArgs.findSome? (fun a =>
+            match a.getRange? with
+            | some rg => if decide (rg.start.byteIdx ≤ stablePos.byteIdx ∧ stablePos.byteIdx ≤ rg.stop.byteIdx) then some a else none
+            | none => none)
+          match opt with
+          | some t =>
+            match t.getRange? with
+            | some rg => (rg.stop, false)
+            | none    => (stablePos, false)
+          | none =>
+            -- 退而求其次：取所有 start < stablePos 的最后一个子战术的 stop
+            let last? := baseArgs.foldl (init := none) (fun acc a =>
+              match a.getRange? with
+              | some rg => if decide (rg.start.byteIdx < stablePos.byteIdx) then some a else acc
+              | none => acc)
+            match last? with
+            | some t => ((t.getRange?).map (·.stop) |>.getD stablePos, false)
+            | none   =>
+              -- 位于 by 头等无子战术之前的缝隙：取第一个子战术的 stop，确保保留其作为前缀
+              match baseArgs[0]? with
+              | some t0 => ((t0.getRange?).map (·.stop) |>.getD stablePos, false)
+              | none    => (stablePos, false)
+        -- 读取目标类型：以 cutPosUtf8 作为锚点
+        let anchorGoals := snap.infoTree.goalsAt? text cutPosUtf8
+        let tyStr? ← match anchorGoals.head? with
+          | some gr => gr.ctxInfo.runMetaM {} do
+              try
+                let g? := gr.tacticInfo.goalsAfter.head? <|> gr.tacticInfo.goalsBefore.head?
+                match g? with
+                | some g =>
+                  g.withContext do
+                    let ty ← instantiateMVars (← g.getType)
+                    let fmt ← ppExpr ty
+                    return some fmt.pretty
+                | none => return none
+              catch _ => return none
+          | none => pure none
+        let some tyStr := tyStr? | return {
+          newText := "", range := mkRangeDtoLsp stLsp enLsp, success := false,
+          errorMsg := some "failed to read goal type" }
+        -- 组装 have/exact 段（AST 解析）
+        let name := s!"h_{params.pos.line}_{params.pos.character}"
+        let snippet := if params.action.trim == "deny"
+          then s!"have {name} : ¬ ({tyStr}) := by human_oracle"
+          else s!"have {name} : {tyStr} := by human_oracle\nexact {name}"
+        -- 若切割点之后不存在任何战术（如单条 inline rfl），则在等号处采用严格比较，排除当前叶子战术
+        let suffixExists : Bool := Id.run do
+          baseArgs.any (fun a =>
+            match a.getRange? with
+            | some rg => decide (rg.start.byteIdx > cutPosUtf8.byteIdx)
+            | none => false)
+        let strictUse := strictAtCut || (!suffixExists)
+        let keptBefore := match targetStx with
+          | .node _ kind _ =>
+            if isTacticSeqKind kind then
+              baseArgs.filter (fun a => match a.getRange? with
+                | some rg => if strictUse then decide (rg.stop.byteIdx < cutPosUtf8.byteIdx) else decide (rg.stop.byteIdx ≤ cutPosUtf8.byteIdx)
+                | none => true)
+            else
+              #[]
+          | _ => #[]
+        let extra := parseTacticSegments env snippet
+        -- 丢弃切割点之后的所有后缀战术，只保留切割点之前的前缀战术，并在此处插入 have/exact 片段
+        let newArgs := extra.toArray
+        let seqInfo := SourceInfo.synthetic (pos := ⟨0⟩) (endPos := ⟨0⟩) (canonical := true)
+        let seqStx := Syntax.node seqInfo `Lean.Parser.Tactic.tacticSeq1Indented newArgs
+        let body ← r.ctxInfo.runMetaM {} do formatTacticSeq seqStx
+        if body == "" then
+          return { newText := "", range := { start := stLsp, stop := enLsp }, success := false,
+                   errorMsg := some "assemble tacticSeq failed" }
+        let contRange : RangeDto := mkRangeDtoLsp stLsp enLsp
+        let baseIndent := String.mk (List.replicate (contRange.start.character + 2) ' ')
+        -- 命中 by 容器，必然需要补 `by`
+        let replacementSeg := makeReplacementSeg true baseIndent body
+        let retWhole := params.returnWholeFile?.getD true
+        if retWhole then
+          let (newFull, fullRange) := spliceWholeFile text contRange replacementSeg
+          -- 记录选择到的 by 容器范围（用于调试定位）
+          try
+            let _ ← appendLog "/tmp/insertHaveByAction_no_probe.log" s!"FALLBACK_NEAREST_BY [{contRange.start.line}:{contRange.start.character}-{contRange.stop.line}:{contRange.stop.character}]\n"
+          catch _ => pure ()
+          return { newText := newFull, range := fullRange, success := true }
+        else
+          try
+            let _ ← appendLog "/tmp/insertHaveByAction_no_probe.log" s!"FALLBACK_NEAREST_BY [{contRange.start.line}:{contRange.start.character}-{contRange.stop.line}:{contRange.stop.character}]\n"
+          catch _ => pure ()
+          return { newText := replacementSeg, range := contRange, success := true }
+      
     | some r =>
       -- Unify container selection here: always choose smallest enclosing tactic sequence.
       let path := results
@@ -772,18 +795,13 @@ def insertHaveByAction (params : InsertHaveByActionParams) : RequestM (RequestTa
         | none    => { start := params.pos, stop := params.pos }
       -- Stable position: clamp the actual hover position into the provided/found block range,
       -- to keep leaf context (e.g., inline `rfl`) instead of outer containers.
-      let blockStartUtf8 := text.lspPosToUtf8Pos rr.start
-      let blockStopUtf8  := text.lspPosToUtf8Pos rr.stop
-      let lo := if blockStartUtf8.byteIdx + 1 < blockStopUtf8.byteIdx then ⟨blockStartUtf8.byteIdx + 1⟩ else blockStartUtf8
-      let hi := if blockStopUtf8.byteIdx > blockStartUtf8.byteIdx + 1 then ⟨blockStopUtf8.byteIdx - 1⟩ else blockStopUtf8
-      let stablePos :=
-        if hoverPos.byteIdx < lo.byteIdx then lo else if hoverPos.byteIdx > hi.byteIdx then hi else hoverPos
+      let stablePos := clampUtf8Into text rr hoverPos
       -- Fetch a reliable ctx for goal type; on failure, return explicit error (no fallback)
       let resultsStable := snap.infoTree.goalsAt? text stablePos
       let name := s!"h_{params.pos.line}_{params.pos.character}"
       let action := params.action.trim
       -- 如果容器不是 tacticSeq，尝试在其子树中找到一个具体的 tactic 节点（如 rfl）作为目标
-      let isTacticNode (s : Syntax) : Bool := true  -- 简化：接受所有节点
+      let isTacticNode (_ : Syntax) : Bool := true  -- 简化：接受所有节点
       let rec findInnerTactic (s : Syntax) : Option Syntax :=
         if isTacticNode s then some s else
         match s with
@@ -796,18 +814,57 @@ def insertHaveByAction (params : InsertHaveByActionParams) : RequestM (RequestTa
             else none
           loop 0
         | _ => none
-      -- If the chosen container is not a tactic sequence (e.g., inline `rfl` tail), force the edit to happen
-      -- at the container level by treating the container itself as the target. This ensures the inline tactic
-      -- is fully replaced by a block body.
-      let targetStx :=
-        if isTacticSeqKind originalStx.getKind then
-          originalStx
+      -- 若原容器不是 tacticSeq（例如 `by rfl`），优先下钻到其 tacticSeq 子节点，
+      -- 使替换范围直接覆盖内层战术（如 `rfl`），从而移除它并避免仅替换到 `by` token。
+      let rec findTacticSeqChild (s : Syntax) : Option Syntax :=
+        if isTacticSeqKind s.getKind then some s else
+        match s with
+        | .node _ _ args =>
+          let rec loop (i : Nat) : Option Syntax :=
+            if h : i < args.size then
+              match findTacticSeqChild (args[i]'h) with
+              | some t => some t
+              | none => loop (i+1)
+            else none
+          loop 0
+        | _ => none
+
+      
+
+      -- 获取子树中最靠右（stop 最大）的节点 stop（AST-only，无窗口扫描）
+      let rec lastStopInSubtree (s : Syntax) : Option String.Pos :=
+        let cur := s.getRange? |>.map (·.stop)
+        match s with
+        | .node _ _ args =>
+          let rec loop (i : Nat) (best : Option String.Pos) : Option String.Pos :=
+            if h : i < args.size then
+              let child := args[i]'h
+              let best1 :=
+                match best, lastStopInSubtree child with
+                | some a, some b => if b.byteIdx > a.byteIdx then some b else some a
+                | none,   some b => some b
+                | some a, none   => some a
+                | none,   none   => none
+              loop (i+1) best1
+            else best
+          match loop 0 cur with
+          | some p => some p
+          | none   => cur
+        | _ => cur
+      -- 选定用于组装的容器节点：优先 tacticSeq；若原节点不是 tacticSeq，则用 term 路径中最近的 by 容器的 tacticSeq 子节点
+      let targetStxPre := (findTacticSeqChild originalStx).getD originalStx
+      let targetStx := Id.run do
+        if isTacticSeqKind targetStxPre.getKind then
+          targetStxPre
         else
-          originalStx
+          let stxsTerm := (collectSyntaxPathAt snap.infoTree hoverPos []).filter isRelevantNode
+          match pickEnclosingBy stxsTerm originalStx with
+          | some byC => (findTacticSeqChild byC).getD byC
+          | none     => targetStxPre
       -- Try to get goal type strictly（容器内复刻 Lean 的最优选择）：
       -- 1) 收集容器内的候选（沿稳定路径），优先选择容器内最内层的节点
       -- 候选来自路径（稳定优先，然后原始），不再限制于某个容器 range，直接选“最内层”（最短范围）
-      let isTacticNode (s : Syntax) : Bool := true  -- 简化：接受所有节点
+      let isTacticNode (_ : Syntax) : Bool := true  -- 简化：接受所有节点
       let pathCands : List (GoalsAtResult × String.Range) := resultsStable.filterMap (fun (gr : GoalsAtResult) =>
         let stx := gr.tacticInfo.stx
         match stx.getRange? with
@@ -834,7 +891,7 @@ def insertHaveByAction (params : InsertHaveByActionParams) : RequestM (RequestTa
           let baseArgs := flattenTacticSeqArgs targetStx
           let lastKept? := baseArgs.foldl (init := none) (fun acc a =>
             match a.getRange? with | some rg => if decide (rg.start.byteIdx < stablePos.byteIdx) then some a else acc | none => acc)
-          let probe? := lastKept? <|> baseArgs.get? 0
+          let probe? := lastKept? <|> baseArgs[0]?
           match probe? with
           | some t =>
             let posOpt := t.getPos?
@@ -860,7 +917,11 @@ def insertHaveByAction (params : InsertHaveByActionParams) : RequestM (RequestTa
                       try
                         let g? := gr.tacticInfo.goalsBefore.head? <|> gr.tacticInfo.goalsAfter.head?
                         match g? with
-                        | some g => let ty ← instantiateMVars (← g.getType); let fmt ← ppExpr ty; return some fmt.pretty
+                        | some g =>
+                          g.withContext do
+                            let ty ← instantiateMVars (← g.getType)
+                            let fmt ← ppExpr ty
+                            return some fmt.pretty
                         | none => return none
                       catch _ => return none
                     match r? with
@@ -877,12 +938,18 @@ def insertHaveByAction (params : InsertHaveByActionParams) : RequestM (RequestTa
                 let g1? := if afterFirst then gr.tacticInfo.goalsAfter.head? else gr.tacticInfo.goalsBefore.head?
                 match g1? with
                 | some g1 =>
-                  let ty ← instantiateMVars (← g1.getType); let fmt ← ppExpr ty; return some fmt.pretty
+                  g1.withContext do
+                    let ty ← instantiateMVars (← g1.getType)
+                    let fmt ← ppExpr ty
+                    return some fmt.pretty
                 | none =>
                   let g2? := if afterFirst then gr.tacticInfo.goalsBefore.head? else gr.tacticInfo.goalsAfter.head?
                   match g2? with
                   | some g2 =>
-                    let ty ← instantiateMVars (← g2.getType); let fmt ← ppExpr ty; return some fmt.pretty
+                    g2.withContext do
+                      let ty ← instantiateMVars (← g2.getType)
+                      let fmt ← ppExpr ty
+                      return some fmt.pretty
                   | none => return none
               let afterFirst := useAfter
               pick afterFirst
@@ -895,63 +962,314 @@ def insertHaveByAction (params : InsertHaveByActionParams) : RequestM (RequestTa
             | some (gr, rg) => s!"{gr.tacticInfo.stx.getKind.toString}@{rg.start.byteIdx}-{rg.stop.byteIdx}"
             | none => "none"
           s!"failed to read goal type at stable position; chosen={chosenStr}; pathStable={resultsStable.length}; results={results.length}; stablePos={stablePos.byteIdx}"
-        return { newText := "", range := rr, success := false, errorMsg := some dbg }
+        do dbgIf s!"[insertHaveByAction] FAILURE: failed to read goal type - {dbg}"
+        return { newText := "", range := rr, success := false, errorMsg := some ("[DEBUG] failed to read goal type - this is path 2: " ++ dbg) }
       let snippet := if action == "deny"
         then s!"have {name} : ¬ ({tyStr}) := by human_oracle"
         else s!"have {name} : {tyStr} := by human_oracle\nexact {name}"
-      -- Reconstruct: keep prefix tactics up to stablePos, then append snippet
+      -- Reconstruct: 在 cutPosUtf8 处插入 snippet，保留前后两侧所有战术
       -- Choose actual container from stable path
       let env := (resultsStable.head?.getD r).ctxInfo.env
+      let stxsTerm := (collectSyntaxPathAt snap.infoTree hoverPos []).filter isRelevantNode
+      let targetStx := (pickNearestTacticSeqInPath stxsTerm).getD ((findTacticSeqChild originalStx).getD originalStx)
       let baseArgs := flattenTacticSeqArgs targetStx
-      -- If the target is not a tactic sequence (e.g., inline `rfl`), drop it entirely to avoid keeping it.
-      -- Otherwise, keep only tactics whose end position is strictly before the stable insertion point.
-      let kept := match targetStx with
+      -- 首选使用当前最内层战术节点的 stop 作为切割点；若不在 baseArgs 中，退化为基于 stablePos 的包含/前驱定位
+      let (cutPosUtf8, strictAtCut) : (String.Pos × Bool) := Id.run do
+        let primaryRg? := (resultsStable.head?.getD r).tacticInfo.stx.getRange?
+        let primaryCut? : Option String.Pos :=
+          match primaryRg? with
+          | some prg =>
+            let m? := baseArgs.findSome? (fun a =>
+              match a.getRange? with
+              | some rg => if decide (rg.start.byteIdx ≤ prg.start.byteIdx ∧ prg.stop.byteIdx ≤ rg.stop.byteIdx) then some a else none
+              | none => none)
+            match m? with
+            | some a => (a.getRange?).map (·.stop)
+            | none   => none
+          | none => none
+        match primaryCut? with
+        | some res => (res, false)
+        | none =>
+          let opt := baseArgs.findSome? (fun a =>
+            match a.getRange? with
+            | some rg => if decide (rg.start.byteIdx ≤ stablePos.byteIdx ∧ stablePos.byteIdx ≤ rg.stop.byteIdx) then some a else none
+            | none => none)
+          match opt with
+          | some t =>
+            match t.getRange? with
+            | some rg => (rg.stop, false)
+            | none    => (stablePos, false)
+          | none =>
+            let last? := baseArgs.foldl (init := none) (fun acc a =>
+              match a.getRange? with
+              | some rg => if decide (rg.start.byteIdx < stablePos.byteIdx) then some a else acc
+              | none => acc)
+            match last? with
+            | some t => ((t.getRange?).map (·.stop) |>.getD stablePos, false)
+            | none   =>
+            match baseArgs[0]? with
+              | some t0 => ((t0.getRange?).map (·.stop) |>.getD stablePos, true)
+              | none    => (stablePos, false)
+      -- 优先采用“基于当前战术语法节点索引”的前缀截取，避免误判 cutPos 落在缝隙导致丢失已有前缀战术。
+      -- 若无法定位当前战术在容器子序列中的索引，再退回到 cutPosUtf8 的区间比较。
+      let primaryStx := (resultsStable.head?.getD r).tacticInfo.stx
+      let idxOpt : Option Nat := Id.run do
+        let rec findIdx (i : Nat) : Option Nat :=
+          if h : i < baseArgs.size then
+            let a := baseArgs[i]'h
+            match a.getRange?, primaryStx.getRange? with
+            | some ra, some rp =>
+              if decide (ra.start.byteIdx ≤ rp.start.byteIdx ∧ rp.stop.byteIdx ≤ ra.stop.byteIdx)
+              then some i else findIdx (i+1)
+            | _, _ => findIdx (i+1)
+          else none
+        findIdx 0
+      let suffixExists : Bool := Id.run do
+        baseArgs.any (fun a =>
+          match a.getRange? with
+          | some rg => decide (rg.start.byteIdx > cutPosUtf8.byteIdx)
+          | none => false)
+      let strictUse := strictAtCut || (!suffixExists)
+      let keptBefore := match targetStx with
         | .node _ kind _ =>
           if isTacticSeqKind kind then
-            baseArgs.filter (fun a => match a.getRange? with
-              | some rg => decide (rg.stop.byteIdx < stablePos.byteIdx)
-              | none => true)
-          else
-            #[]
+            match idxOpt with
+            | some i => baseArgs.extract 0 (i+1)
+            | none =>
+              baseArgs.filter (fun a => match a.getRange? with
+                | some rg => if strictUse then decide (rg.stop.byteIdx < cutPosUtf8.byteIdx) else decide (rg.stop.byteIdx ≤ cutPosUtf8.byteIdx)
+                | none => true)
+          else #[]
         | _ => #[]
+      -- 直接以稳定位置选择“包含 stablePos 的子战术”索引，用于精准定位切点
+      let cutIdxFromPos? : Option Nat := Id.run do
+        let rec goCut (i : Nat) : Option Nat :=
+          if h : i < baseArgs.size then
+            match (baseArgs[i]'h).getRange? with
+            | some rg =>
+              if decide (rg.start.byteIdx ≤ stablePos.byteIdx ∧ stablePos.byteIdx ≤ rg.stop.byteIdx)
+              then some i else goCut (i+1)
+            | none => goCut (i+1)
+          else none
+        goCut 0
+      -- 计算 by 容器范围（供整体替换与缩进、类型读取使用）
+      let stxsTerm := (collectSyntaxPathAt snap.infoTree hoverPos []).filter isRelevantNode
+      let (contRangeRaw, usedByContainer) : (RangeDto × Bool) := Id.run do
+        let byCont? : Option Syntax := pickEnclosingBy stxsTerm targetStx
+        let useBy (byC : Syntax) : Option (RangeDto × Bool) :=
+          let st? := byC.getRange? |>.map (fun rg => text.utf8PosToLspPos rg.start)
+          let child? := findTacticSeqChild byC
+          let en? : Option Lsp.Position :=
+            match child? with
+            | some seq =>
+              match lastStopInSubtree seq with
+              | some p => some (text.utf8PosToLspPos p)
+              | none   =>
+                match byC.getTailPos? with
+                | some q => some (text.utf8PosToLspPos q)
+                | none   =>
+                  match byC.getRange? with
+                  | some rg => some (text.utf8PosToLspPos rg.stop)
+                  | none    => none
+            | none =>
+              match lastStopInSubtree byC with
+              | some p => some (text.utf8PosToLspPos p)
+              | none   =>
+                match byC.getTailPos? with
+                | some q => some (text.utf8PosToLspPos q)
+                | none   =>
+                  match byC.getRange? with
+                  | some rg => some (text.utf8PosToLspPos rg.stop)
+                  | none    => none
+          match st?, en? with
+          | some st, some en => some (({ start := st, stop := en } : RangeDto), true)
+          | _, _ => none
+        match byCont? with
+        | some byC =>
+          match useBy byC with
+          | some res => res
+          | none => (rr, false)
+        | none =>
+          let allBy := collectByNodes snap.infoTree []
+          match chooseNearestBy allBy hoverPos with
+          | some byC =>
+            match useBy byC with
+            | some res => res
+            | none => (rr, false)
+          | none =>
+            match targetStx.getRange? with
+            | some rg => ({ start := text.utf8PosToLspPos rg.start, stop := text.utf8PosToLspPos rg.stop }, false)
+            | none    => (rr, false)
+      -- snippet 的目标类型严格取自当前光标处的 InfoTree 目标（与 InfoView 一致）
+      let snippet := if params.action.trim == "deny"
+        then s!"have {name} : ¬ ({tyStr}) := by human_oracle"
+        else s!"have {name} : {tyStr} := by human_oracle\nexact {name}"
+      do dbgIf s!"[insertHaveByAction] About to parse snippet: '{snippet}'"
       let extra := parseTacticSegments env snippet
-      let newArgs := kept ++ extra.toArray
-      let newStx := buildIndentedSeq newArgs
-      let body ← (resultsStable.head?.getD r).ctxInfo.runMetaM {} do
-        formatTacticSeq newStx
-      -- Indent and compute the replacement segment for the chosen container
-      let some contRg := targetStx.getRange? | return { newText := body, range := rr, success := true }
-      -- 优先使用客户端提供的 by 块范围进行落地；否则退回到当前目标节点的范围
-      let contRange := match params.blockRange? with
-        | some br => br
-        | none    => RangeDto.fromStringRange text contRg
-      let baseIndent := String.mk (List.replicate contRange.start.character ' ')
-      let mkIndented (indent : String) (s : String) : String :=
-        let parts := s.splitOn "\n"
-        parts.foldl (fun acc ln => if acc.isEmpty then indent ++ ln else acc ++ "\n" ++ indent ++ ln) ""
-      -- includeBy 规则：仅当目标确认为 tacticSeq 容器，才允许不包 `by`；
-      -- 否则强制包 `by`，以保证插入段位于战术语境（决不把战术投到 term）。
-      let includeBy :=
+      do dbgIf s!"[insertHaveByAction] Parsed {extra.length} segments"
+      let segKinds := extra.map (fun s => s.getKind.toString)
+      let kindsStr := String.intercalate ", " segKinds
+      let mut dbgAll := s!"Segments kinds: [{kindsStr}] at pos {params.pos.line}:{params.pos.character}\n"
+      -- 逐段尝试 PrettyPrinter，定位是哪一段触发异常
+      let perSegLogs ← (resultsStable.head?.getD r).ctxInfo.runMetaM {} do
+        let rec loop (xs : List Syntax) (acc : String) : MetaM String :=
+          match xs with
+          | [] => pure acc
+          | s :: ss => do
+            let kind := s.getKind
+            let acc1 := acc ++ s!"pp[{kind}]: "
+            let acc2 ← (do
+              try
+                let fmt ← PrettyPrinter.ppCategory `tactic s
+                pure (acc1 ++ "OK: " ++ fmt.pretty ++ "\n")
+              catch e => do
+                let msg ← e.toMessageData.toString
+                pure (acc1 ++ s!"ERR: {msg}\n"))
+            loop ss acc2
+        loop extra ("")
+      dbgAll := dbgAll ++ perSegLogs
+      -- 丢弃切割点之后的所有后缀战术
+      -- 仅替换后缀：前缀保持不变
+      let newArgs := keptBefore ++ extra.toArray
+      -- 纯 AST 组装：直接构造规范的 tacticSeq1Indented 节点并整段 pretty-print（无字符串拼接/解析）。
+      let (body, dbgPP) ← (resultsStable.head?.getD r).ctxInfo.runMetaM {} do
+        -- 直接在 AST 上构造 tacticSeq1Indented 节点，再用健壮的 formatTacticSeq 渲染（内部自带回退到子战术渲染）。
+        let seqInfo := SourceInfo.synthetic (pos := ⟨0⟩) (endPos := ⟨0⟩) (canonical := true)
+        let seqStx := Syntax.node seqInfo `Lean.Parser.Tactic.tacticSeq1Indented newArgs
+        try
+          let out ← formatTacticSeq seqStx
+          let dbg := s!"assembleSeq(AST:tacticSeq1Indented) OK len={out.length}\n"
+          return (out, dbg)
+        catch e =>
+          let msg ← e.toMessageData.toString
+          let dbg := s!"assembleSeq(AST:tacticSeq1Indented) formatTacticSeq error: {msg}\n"
+          return ("", dbg)
+      dbgAll := dbgAll ++ s!"keptCount={keptBefore.size} targetKind={targetStx.getKind} stablePos={stablePos.byteIdx} tyStr={tyStr}\n" ++ dbgPP
+      -- term 路径（用于定位 by 容器）
+      let stxsTerm := (collectSyntaxPathAt snap.infoTree hoverPos []).filter isRelevantNode
+      if body == "" then
+        -- 失败时，保留现场信息并明确失败（不做字符串替换回退）
+        let _ ← writeFileIfDebug "/tmp/insertHaveByAction_debug.log" (dbgAll ++ "assemble failed; aborting.\n")
+        return { newText := "", range := rr, success := false, errorMsg := some "assemble tacticSeq failed" }
+      dbgAll := dbgAll ++ s!"formattedOK len={body.length}\n"
+      -- Indent and compute the replacement segment for the chosen container（纯 AST）
+      -- 计算替换范围统一封装：与 getByBlockRange 共享同一逻辑；若 term 路径未命中 by，则全文件收集最近的 by
+      let (contRangeRaw, usedByContainer) : (RangeDto × Bool) := Id.run do
+        let byCont? : Option Syntax := pickEnclosingBy stxsTerm targetStx
+        let useBy (byC : Syntax) : Option (RangeDto × Bool) :=
+          let st? := byC.getRange? |>.map (fun rg => text.utf8PosToLspPos rg.start)
+          let child? := findTacticSeqChild byC
+          let en? : Option Lsp.Position :=
+            match child? with
+            | some seq =>
+              match lastStopInSubtree seq with
+              | some p => some (text.utf8PosToLspPos p)
+              | none   =>
+                match byC.getTailPos? with
+                | some q => some (text.utf8PosToLspPos q)
+                | none   =>
+                  match byC.getRange? with
+                  | some rg => some (text.utf8PosToLspPos rg.stop)
+                  | none    => none
+            | none =>
+              match lastStopInSubtree byC with
+              | some p => some (text.utf8PosToLspPos p)
+              | none   =>
+                match byC.getTailPos? with
+                | some q => some (text.utf8PosToLspPos q)
+                | none   =>
+                  match byC.getRange? with
+                  | some rg => some (text.utf8PosToLspPos rg.stop)
+                  | none    => none
+          match st?, en? with
+          | some st, some en => some (({ start := st, stop := en } : RangeDto), true)
+          | _, _ => none
+        match byCont? with
+        | some byC =>
+          match useBy byC with
+          | some res => res
+          | none => (rr, false)
+        | none =>
+          -- 全文件最近 by 容器
+          let allBy := collectByNodes snap.infoTree []
+          match chooseNearestBy allBy hoverPos with
+          | some byC =>
+            match useBy byC with
+            | some res => res
+            | none => (rr, false)
+          | none =>
+            -- tactic context（不包 by）：targetStx 应为 tacticSeq
+            match targetStx.getRange? with
+            | some rg => ({ start := text.utf8PosToLspPos rg.start, stop := text.utf8PosToLspPos rg.stop }, false)
+            | none    => (rr, false)
+      -- 若位于分支（matchAlt/matchRhs），将起点调整到 `=>` 之后，避免覆盖头部符号
+      let contRange : RangeDto := Id.run do
+        match smallestMatchAltOrRhsInPath stxsTerm with
+        | some alt =>
+          match (alt.getRange?), findArrowAtomEndPos alt with
+          | some rgAlt, some arrowEnd =>
+            let st' := text.utf8PosToLspPos arrowEnd
+            let en' := text.utf8PosToLspPos rgAlt.stop
+            { start := st', stop := en' }
+          | _, _ => contRangeRaw
+        | none => contRangeRaw
+      -- 若能定位当前战术在容器中的索引，则从“已保留的最后一个战术的 stop”开始替换，仅替换后缀（保持 by 体及前缀不变）。
+      -- 若无法定位索引但已存在前缀，则用 cutPosUtf8 作为替换起点；否则保持整个容器范围。
+      let contRange := Id.run do
         match targetStx with
-        | .node _ kind _ => if isTacticSeqKind kind then params.includeByOnSeq?.getD false else true
-        | _               => true
-      let replacementSeg := if includeBy
-        then s!"by\n{mkIndented baseIndent body}"
-        else s!"\n{mkIndented baseIndent body}"
+        | .node _ kind _ =>
+          if isTacticSeqKind kind then
+            -- 优先使用“包含 stablePos 的子战术”作为切点；否则退回 idxOpt；再退回首个子战术/稳定位置
+            match cutIdxFromPos? with
+            | some j =>
+              match (baseArgs[j]!.getRange?) with
+              | some rgJ => ({ start := text.utf8PosToLspPos rgJ.stop, stop := contRangeRaw.stop } : RangeDto)
+              | none     => ({ start := text.utf8PosToLspPos cutPosUtf8, stop := contRangeRaw.stop } : RangeDto)
+            | none =>
+              match idxOpt with
+              | some i =>
+                match (baseArgs[i]!.getRange?) with
+                | some rgI => ({ start := text.utf8PosToLspPos rgI.stop, stop := contRangeRaw.stop } : RangeDto)
+                | none     => ({ start := text.utf8PosToLspPos cutPosUtf8, stop := contRangeRaw.stop } : RangeDto)
+              | none =>
+                match baseArgs[0]? with
+                | some t0 =>
+                  match t0.getRange? with
+                  | some rg0 => ({ start := text.utf8PosToLspPos rg0.start, stop := contRangeRaw.stop } : RangeDto)
+                  | none     => ({ start := text.utf8PosToLspPos cutPosUtf8, stop := contRangeRaw.stop } : RangeDto)
+                | none => ({ start := text.utf8PosToLspPos cutPosUtf8, stop := contRangeRaw.stop } : RangeDto)
+          else contRangeRaw
+        | _ => contRangeRaw
+      -- 以容器首个子战术的起始列作为 by 体的基线缩进，更符合 Lean 实际的 by 缩进规则
+      let baseIndentCol := Id.run do
+        match baseArgs[0]? with
+        | some t0 =>
+          match t0.getRange? with
+          | some rg0 => (text.utf8PosToLspPos rg0.start).character
+          | none     => contRangeRaw.start.character + 2
+        | none => contRangeRaw.start.character + 2
+      let baseIndent := String.mk (List.replicate baseIndentCol ' ')
+      -- 后缀替换：若 contRange.start ≠ contRangeRaw.start，则必定处于 by 体内，前缀已保留，不应额外补 `by`。
+      -- 仅当替换覆盖整个容器（包括 by 头）时，才在片段前补 `by`。
+      -- 仅在分支上下文（matchAlt/matchRhs）需要补 `by`，普通 by 体内做后缀追加不再补 `by`
+      let includeBy := (smallestMatchAltOrRhsInPath stxsTerm).isSome
+      let replacementSeg := makeReplacementSeg includeBy baseIndent body
+      dbgAll := dbgAll ++ s!"includeBy={includeBy} contKind={match targetStx with | .node _ k _ => k | _ => Name.anonymous} replacementPreview={(replacementSeg.take 800)}\n"
       let retWhole := params.returnWholeFile?.getD true
+      dbgAll := dbgAll ++ s!"contRange.lsp=[{contRange.start.line}:{contRange.start.character}-{contRange.stop.line}:{contRange.stop.character}] includeBy={includeBy}\n"
+      do dbgIf s!"[NO_PROBE] insertHaveByAction includeBy={includeBy} contRange=[{contRange.start.line}:{contRange.start.character}-{contRange.stop.line}:{contRange.stop.character}]"
+      try
+        let _ ← writeFileIfDebug "/tmp/insertHaveByAction_no_probe.log" s!"RANGE [{contRange.start.line}:{contRange.start.character}-{contRange.stop.line}:{contRange.stop.character}] includeBy={includeBy}\n"
+      catch _ => pure ()
       if retWhole then
-        -- Splice into whole file deterministically and return whole-file replacement
-        let replaceStartUtf8 := text.lspPosToUtf8Pos contRange.start
-        let replaceStopUtf8  := text.lspPosToUtf8Pos contRange.stop
-        let src := text.source
-        let pre := src.extract ⟨0⟩ replaceStartUtf8
-        let suf := src.extract replaceStopUtf8 src.endPos
-        let newFull := pre ++ replacementSeg ++ suf
-        let fullRange : RangeDto :=
-          { start := { line := 0, character := 0 }
-          , stop  := text.utf8PosToLspPos src.endPos }
+        -- Splice into whole file deterministically and return whole-file replacement（范围由 AST 严格确定）
+        let (newFull, fullRange) := spliceWholeFile text contRange replacementSeg
+        dbgAll := dbgAll ++ s!"returningWhole success=true newFull.len={newFull.length}\n"
+        let _ ← writeFileIfDebug "/tmp/insertHaveByAction_debug.log" dbgAll
         return { newText := newFull, range := fullRange, success := true }
       else
+        dbgAll := dbgAll ++ s!"returningPartial success=true seg.len={replacementSeg.length}\n"
+        let _ ← writeFileIfDebug "/tmp/insertHaveByAction_debug.log" dbgAll
         return { newText := replacementSeg, range := contRange, success := true }
 
 /-- Get current by-block (tactic) range at position -/
@@ -968,33 +1286,26 @@ structure ByBlockRangeResult where
   parentKinds : Array String := #[]
   isTacticContext : Bool := false
   isTermContext : Bool := false
+  buildTag : String := MathEye.buildTag
   deriving FromJson, ToJson
 
 @[server_rpc_method]
 def getByBlockRange (params : ByBlockRangeParams) : RequestM (RequestTask ByBlockRangeResult) := do
-  withWaitFindSnapAtPos params.pos fun snap => do
-    let doc ← readDoc
-    let text : FileMap := doc.meta.text
+  -- 使用文件末尾位置以获得完整 InfoTree，再在其上以 params.pos 作为查询点决策容器
+  let doc ← readDoc
+  let text : FileMap := doc.meta.text
+  let src := text.source
+  let endLsp : Lsp.Position := text.utf8PosToLspPos src.endPos
+  withWaitFindSnapAtPos endLsp fun snap => do
+    -- 注意：hoverPos 仍取调用点，InfoTree 来自文件末尾的完整快照
     let hoverPos : String.Pos := text.lspPosToUtf8Pos params.pos
+    do dbgIf s!"[NO_PROBE] getByBlockRange ENTRY pos={params.pos.line}:{params.pos.character}"
+    try
+      let _ ← appendLog "/tmp/getByBlockRange_no_probe.log" s!"ENTRY {params.pos.line}:{params.pos.character}\n"
+    catch _ => pure ()
 
-    -- Check both tactic and term contexts
-    -- Robust probe around hover to avoid seam positions
-    let tacticResults :=
-      let rs0 := snap.infoTree.goalsAt? text hoverPos
-      if rs0.isEmpty then
-        let baseLsp := params.pos
-        let probeRight : List Lsp.Position := (List.range 41).map (fun i => { line := baseLsp.line, character := baseLsp.character + i })
-        let probeLeft  : List Lsp.Position := (List.range 4).map (fun i => { line := baseLsp.line, character := baseLsp.character - i })
-        let probes := probeLeft ++ probeRight
-        let rec firstSome (ps : List Lsp.Position) : List GoalsAtResult :=
-          match ps with
-          | [] => rs0
-          | p :: ps' =>
-            let pos := text.lspPosToUtf8Pos p
-            let rs := snap.infoTree.goalsAt? text pos
-            if rs.isEmpty then firstSome ps' else rs
-        firstSome probes
-      else rs0
+    -- Check both tactic and term contexts（无探针）
+    let tacticResults := snap.infoTree.goalsAt? text hoverPos
     let termResults := snap.infoTree.termGoalAt? hoverPos
     let isTacticContext := tacticResults.length > 0
     let isTermContext := termResults.isSome
@@ -1003,50 +1314,14 @@ def getByBlockRange (params : ByBlockRangeParams) : RequestM (RequestTask ByBloc
     | some r0 =>
       -- Get the complete syntax path by walking up from the tactic node
       -- We need to find the parent containers that contain this tactic
-      let tacticStx := r0.tacticInfo.stx
-      -- Get complete syntax path by probing around the position to find parent containers
-      let stxs := Id.run do
-        let leafStx := r0.tacticInfo.stx
-        let leafRange? := leafStx.getRange?
-        match leafRange? with
-        | none => [leafStx]
-        | some leafRg =>
-          -- Probe positions around the leaf to find parent containers
-          let probePositions : List String.Pos := [
-            ⟨leafRg.start.byteIdx⟩,
-            ⟨if leafRg.start.byteIdx > 0 then leafRg.start.byteIdx - 1 else leafRg.start.byteIdx⟩,
-            ⟨if leafRg.start.byteIdx > 1 then leafRg.start.byteIdx - 2 else leafRg.start.byteIdx⟩,
-            ⟨if leafRg.start.byteIdx > 2 then leafRg.start.byteIdx - 3 else leafRg.start.byteIdx⟩
-          ]
-          let mut allContainers : List Syntax := []
-          for pos in probePositions do
-            let resultsAtPos := snap.infoTree.goalsAt? text pos
-            for res in resultsAtPos do
-              let stx := res.tacticInfo.stx
-              -- Only include containers that properly contain our leaf node
-              match stx.getRange? with
-              | some stxRg =>
-                if stxRg.start.byteIdx ≤ leafRg.start.byteIdx && 
-                   leafRg.stop.byteIdx ≤ stxRg.stop.byteIdx &&
-                   (stxRg.start != leafRg.start || stxRg.stop != leafRg.stop) then
-                  -- Avoid duplicates
-                  if !allContainers.any (fun existing => 
-                    match existing.getRange? with
-                    | some exRg => exRg.start == stxRg.start && exRg.stop == stxRg.stop
-                    | none => false) then
-                    allContainers := stx :: allContainers
-              | none => continue
-          -- Add the leaf node itself
-          allContainers := leafStx :: allContainers
-          -- Sort by range size (largest first) to get proper nesting order
-          let sorted := allContainers.toArray.qsort (fun a b =>
-            match a.getRange?, b.getRange? with
-            | some ra, some rb =>
-              let lenA := ra.stop.byteIdx - ra.start.byteIdx
-              let lenB := rb.stop.byteIdx - rb.start.byteIdx
-              lenA > lenB
-            | _, _ => false)
-          sorted.toList
+      -- let tacticStx := r0.tacticInfo.stx
+      -- 语法路径：不探针，直接取同一 hover 位置的所有 tactic 节点（由 infoTree 提供）
+      let stxs := tacticResults.map (fun res => res.tacticInfo.stx)
+      let stxsTerm := (collectSyntaxPathAt snap.infoTree hoverPos []).filter isRelevantNode
+      let _ ← writeFileIfDebug "/tmp/getByBlockRange_debug.log" s!"TERM path kinds: {stxsTerm.map (fun s => s.getKind.toString)}\n"
+      let byNodesDbg := stxsTerm.filter (fun s => s.getKind == `Lean.Parser.Term.byTactic)
+      let byRanges := byNodesDbg.map (fun s => match s.getRange? with | some rg => s!"[{(text.utf8PosToLspPos rg.start).line}:{(text.utf8PosToLspPos rg.start).character}-{(text.utf8PosToLspPos rg.stop).line}:{(text.utf8PosToLspPos rg.stop).character}]" | none => "[nr]")
+      let _ ← appendLog "/tmp/getByBlockRange_debug.log" s!"TERM by ranges: {byRanges}\n"
 
       -- Collect syntax context information
       let parentKinds : Array String := stxs.toArray.map (fun s => s.getKind.toString)
@@ -1058,150 +1333,147 @@ Position: line {params.pos.line}, char {params.pos.character}
 Complete syntax path nodes: {parentKinds.toList}
 Tactic results count: {tacticResults.length}
 "
-      let _ ← IO.FS.writeFile "/tmp/getByBlockRange_debug.log" debugMsg
+      let _ ← appendLog "/tmp/getByBlockRange_debug.log" debugMsg
 
       -- Prefer the smallest enclosing tactic sequence container as the by-block range
       let debugMsg2 := s!"About to call chooseSmallestTacticSeq with {stxs.length} nodes
 "
-      let _ ← IO.FS.writeFile "/tmp/getByBlockRange_debug.log" (debugMsg ++ debugMsg2)
+      let _ ← appendLog "/tmp/getByBlockRange_debug.log" (debugMsg ++ debugMsg2)
       let container0 := chooseSmallestTacticSeq stxs r0.tacticInfo.stx
       let debugMsg3 := s!"chooseSmallestTacticSeq returned: {container0.getKind}
 Selected container0: {container0.getKind}
 "
-      let _ ← IO.FS.writeFile "/tmp/getByBlockRange_debug.log" (debugMsg ++ debugMsg2 ++ debugMsg3)
+      let _ ← appendLog "/tmp/getByBlockRange_debug.log" (debugMsg ++ debugMsg2 ++ debugMsg3)
 
-      -- If the chosen node is a term `by` container, descend to its tacticSeq child when available
-      let rec findTacticSeqChild (s : Syntax) : Option Syntax :=
-        if isTacticSeqKind s.getKind then some s else
-        match s with
-        | .node _ _ args =>
-          let rec loop (i : Nat) : Option Syntax :=
-            if h : i < args.size then
-              match findTacticSeqChild (args[i]'h) with
-              | some t => some t
-              | none => loop (i+1)
-            else none
-          loop 0
-        | _ => none
+      -- 使用顶层工具：tacticSeq 子节点与子树最右 stop
 
       -- Prefer tacticSeq child if available; otherwise use container0
-      -- This ensures the returned range points to the block body, not the 'by' header
-      let rec findTacticSeqChild (s : Syntax) : Option Syntax :=
-        if isTacticSeqKind s.getKind then some s else
-        match s with
-        | .node _ _ args =>
-          let rec loop (i : Nat) : Option Syntax :=
-            if h : i < args.size then
-              match findTacticSeqChild (args[i]'h) with
-              | some t => some t
-              | none => loop (i+1)
-            else none
-          loop 0
-        | _ => none
-      let container := match findTacticSeqChild container0 with
+      let containerPre := match findTacticSeqChild container0 with
         | some seq => seq
         | none     => container0
-      let finalMsg := match container.getRange? with
-        | some rg => s!"Final container: {container.getKind}
-Container range: {rg.start.byteIdx}-{rg.stop.byteIdx}
+      -- 若在分支上下文（matchAlt/matchRhs），优先用分支容器
+      let container :=
+        match smallestMatchAltOrRhsInPath stxsTerm with
+        | some alt => alt
+        | none     => containerPre
+      -- 统一容器范围计算：优先 by 容器（起点=by.start；终点=子 tacticSeq 的最末叶 stop），否则退回 tacticSeq 容器完整范围
+      let view? := containerView text stxsTerm container
+
+      -- 为返回值选择“有效语法种类”：若命中 by 容器，则以 byTactic 为准；否则以 container 为准
+      let effectiveKind : Name := Id.run do
+        match pickEnclosingBy stxsTerm container with
+        | some byC => byC.getKind
+        | none     => container.getKind
+      let _ ← appendLog "/tmp/getByBlockRange_debug.log" s!"effectiveKind={effectiveKind}\n"
+
+      let finalMsg := match view? with
+        | some v => s!"Final container: {container.getKind}
+Container range(LSP): [{v.start.line}:{v.start.character}-{v.stop.line}:{v.stop.character}]
 "
         | none => s!"Final container: {container.getKind}
 Container has no range!
 "
-      let _ ← IO.FS.writeFile "/tmp/getByBlockRange_debug.log" (debugMsg ++ debugMsg2 ++ debugMsg3 ++ finalMsg)
+      let _ ← appendLog "/tmp/getByBlockRange_debug.log" (debugMsg ++ debugMsg2 ++ debugMsg3 ++ finalMsg)
+      do dbgIf s!"[NO_PROBE] getByBlockRange container={container.getKind}"
+      try
+        let _ ← appendLog "/tmp/getByBlockRange_no_probe.log" s!"CONTAINER {container.getKind}\n"
+      catch _ => pure ()
 
-      let some rg := container.getRange? | return {
+      -- 对分支容器：调整范围起点为 `=>` 之后，确保保留头部 `=>`
+      let viewAdj? : Option ContainerView := Id.run do
+        match view?, (smallestMatchAltOrRhsInPath stxsTerm) with
+        | some v, some alt =>
+          match findArrowAtomEndPos alt with
+          | some arrowEnd => some { v with start := text.utf8PosToLspPos arrowEnd }
+          | none          => view?
+        | _, _ => view?
+      let some v := viewAdj? | return {
         range := { start := params.pos, stop := params.pos },
         success := false,
         errorMsg := some "no range"
       }
+      -- Guard against degenerate range strictly
+      if not (validLspRange text v.start v.stop) then
+        return {
+          range := { start := params.pos, stop := params.pos },
+          success := false,
+          errorMsg := some "invalid by-block range"
+        }
+      let outRange : RangeDto := mkRangeDtoLsp v.start v.stop
+      let finalRangeMsg := s!"Returning range LSP: [{outRange.start.line}:{outRange.start.character}-{outRange.stop.line}:{outRange.stop.character}] kind={container.getKind}"
+      let _ ← appendLog "/tmp/getByBlockRange_debug.log" (debugMsg ++ debugMsg2 ++ debugMsg3 ++ finalMsg ++ finalRangeMsg)
+      do dbgIf s!"[NO_PROBE] getByBlockRange outRange=[{outRange.start.line}:{outRange.start.character}-{outRange.stop.line}:{outRange.stop.character}]"
+      try
+        let _ ← appendLog "/tmp/getByBlockRange_no_probe.log" s!"OUT [{outRange.start.line}:{outRange.start.character}-{outRange.stop.line}:{outRange.stop.character}]\n"
+      catch _ => pure ()
       return {
-        range := RangeDto.fromStringRange text rg,
+        range := outRange,
         success := true,
-        syntaxKind := some container.getKind.toString,
+        syntaxKind := some ((view?.map (·.kind.toString)).getD ""),
         isMatchAlt := hasMatchAlt,
         parentKinds := parentKinds,
         isTacticContext := isTacticContext,
         isTermContext := isTermContext
       }
     | none =>
-      -- No tactic context found, check if we're in term context
-      let termResults := snap.infoTree.termGoalAt? hoverPos
-      let isTermContext := termResults.isSome
-      return {
-        range := { start := params.pos, stop := params.pos },
-        success := false,
-        errorMsg := some "no tactic at pos",
-        isTacticContext := false,
-        isTermContext := isTermContext
-      }
+      -- 位置不在战术节点上：以 AST 遍历收集所有 by 容器，选取与 pos 最近的一个（确定性规则）
+      let allBy := collectByNodes snap.infoTree []
+      match chooseNearestBy allBy hoverPos with
+      | none =>
+        return {
+          range := { start := params.pos, stop := params.pos }, success := false,
+          errorMsg := some "no by container in file",
+          isTacticContext := false,
+          isTermContext := isTermContext
+        }
+      | some byC =>
+        let st? := byC.getRange? |>.map (fun rg => text.utf8PosToLspPos rg.start)
+        let child? := findTacticSeqChild byC
+        let en? : Option Lsp.Position :=
+          match child? with
+          | some seq =>
+            match lastStopInSubtree seq with
+            | some p => some (text.utf8PosToLspPos p)
+            | none   =>
+              match byC.getTailPos? with
+              | some q => some (text.utf8PosToLspPos q)
+              | none   =>
+                match byC.getRange? with
+                | some rg => some (text.utf8PosToLspPos rg.stop)
+                | none    => none
+          | none =>
+            match lastStopInSubtree byC with
+            | some p => some (text.utf8PosToLspPos p)
+            | none   =>
+              match byC.getTailPos? with
+              | some q => some (text.utf8PosToLspPos q)
+              | none   =>
+                match byC.getRange? with
+                | some rg => some (text.utf8PosToLspPos rg.stop)
+                | none    => none
+        match st?, en? with
+        | some st, some en =>
+          if not (validLspRange text st en) then
+            return { range := { start := params.pos, stop := params.pos }, success := false,
+                     errorMsg := some "invalid by-block range" }
+          let outRange : RangeDto := mkRangeDtoLsp st en
+          return {
+            range := outRange,
+            success := true,
+            syntaxKind := some byC.getKind.toString,
+            isMatchAlt := false,
+            parentKinds := #[],
+            isTacticContext := false,
+            isTermContext := true
+          }
+        | _, _ =>
+          return {
+            range := { start := params.pos, stop := params.pos }, success := false,
+            errorMsg := some "no range",
+            isTacticContext := false,
+            isTermContext := true
+          }
 
-/-- Convert AST data to formatted text using Lean native formatter -/
-/- DEPRECATED/DEV-ONLY: 不导出为 RPC；保留文档与外部工具使用 -/
-def convertASTToText (params : ASTDataParams) : RequestM (RequestTask TextConversionResult) := do
-  RequestM.asTask do
-    -- Real implementation: Parse JSON → DTO → Syntax → Format
-    -- Note: This requires proper JSON parsing for SyntaxNodeDto
-    -- For now, use the external Python tool: final_roundtrip_tool.py
-    return {
-      text := "Use final_roundtrip_tool.py for real AST conversion",
-      success := false,
-      errorMsg := some "Use external tool: ./final_roundtrip_tool.py <file>"
-    }
-
-/-- Complete file round-trip conversion test -/
-structure FileRoundTripTestParams where
-  content : String
-  deriving FromJson, ToJson
-
-structure FileRoundTripTestResult where
-  originalContent : String
-  convertedContent : String
-  success : Bool
-  errorMsg : Option String := none
-  deriving FromJson, ToJson
-
-/- DEPRECATED/DEV-ONLY: 不导出为 RPC；保留文档与外部工具使用 -/
-def testFileRoundTripConversion (params : FileRoundTripTestParams) : RequestM (RequestTask FileRoundTripTestResult) := do
-  RequestM.asTask do
-    -- Real round-trip conversion is implemented in final_roundtrip_tool.py
-    -- This tool provides complete Lean → jixia AST → MathEye DTO → Lean formatter
-    -- with proper semicolon insertion for tactic sequences
-  return {
-      originalContent := params.content,
-      convertedContent := "Use ./final_roundtrip_tool.py for real round-trip conversion",
-      success := false,
-      errorMsg := some "Real implementation available: ./final_roundtrip_tool.py <file> --verbose --verify"
-    }
-
--- Re-export note: SyntaxNodeDto 已在文件前部定义（dev-only 部分），此处不再重复定义。
-
-def isWordChar (c : Char) : Bool := c.isAlphanum || c == '_' || c == '«' || c == '»' || c == '"'
-
-def firstChar? (s : String) : Option Char := s.toList.head?
-def lastChar? (s : String) : Option Char := s.toList.reverse.head?
-
-def needsSpace (prev : Option Char) (next : Option Char) : Bool :=
-  match prev, next with
-  | some p, some n => isWordChar p && isWordChar n
-  | _, _ => False
-
--- REMOVED: Manual formatting functions replaced by Lean native PrettyPrinter
-
-def dtoToSyntax : SyntaxNodeDto → Syntax
-  | { kind := "missing", .. } => .missing
-  | { kind := "atom", value? := some v, .. } =>
-    .atom (SourceInfo.synthetic (pos := ⟨0⟩) (endPos := ⟨0⟩) (canonical := true)) v
-  | { kind := "ident", value? := some v, .. } =>
-    let nm : Name := v.split (· == '.') |>.foldl Name.mkStr Name.anonymous
-    .ident (SourceInfo.synthetic (pos := ⟨0⟩) (endPos := ⟨0⟩) (canonical := false)) v.toSubstring nm []
-  | { kind, children, .. } =>
-    let k := kind.split (· == '.') |>.foldl Name.mkStr Name.anonymous
-    let args := children.map dtoToSyntax
-    .node (SourceInfo.synthetic (pos := ⟨0⟩) (endPos := ⟨0⟩) (canonical := false)) k args
-
-end MathEye
-namespace MathEye
 /- Anchor path item for identifying a container deterministically (MVP keeps it empty) -/
 structure AnchorPathItem where
   kind : String
@@ -1232,36 +1504,42 @@ structure AnchorPathItem where
 
   @[server_rpc_method]
   def restoreByBlock (params : RestoreByBlockParams) : RequestM (RequestTask RestoreByBlockResult) := do
-    withWaitFindSnapAtPos params.blockRange.start fun snap => do
-      let doc ← readDoc
-      let text : FileMap := doc.meta.text
-      let startPos : String.Pos := text.lspPosToUtf8Pos params.blockRange.start
-      let results := snap.infoTree.goalsAt? text startPos
+    -- 使用文件末尾快照，避免在边界位置取不到上下文
+    let doc ← readDoc
+    let text : FileMap := doc.meta.text
+    let src := text.source
+    let endLsp : Lsp.Position := text.utf8PosToLspPos src.endPos
+    withWaitFindSnapAtPos endLsp fun snap => do
+      -- 将起点 clamp 到 by 块内部，避免落在 token seam 上
+      let startUtf8 := text.lspPosToUtf8Pos params.blockRange.start
+      let stableUtf8 := clampUtf8Into text params.blockRange startUtf8
+      let results := snap.infoTree.goalsAt? text stableUtf8
       match results.head? with
       | none => return { success := false, errorMsg := some "Missing context at block start" }
       | some r =>
-        -- Parse recorded content as a tactic sequence; do not rely on string surgery
         let env := r.ctxInfo.env
-        let parsed := Parser.runParserCategory env `tacticSeq1Indented params.originalByBlockContent
-        match parsed with
-        | Except.error _ => return { success := false, errorMsg := some "ParseError" }
-        | Except.ok seqNew =>
-          -- Pretty print via Lean formatter, then splice back at recorded range
+        -- 解析原始 by 块内容：优先将其作为 tacticSeq1Indented；失败则尝试作为 term（含 by），抽出其子 tacticSeq
+        let trySeq : Except String Syntax :=
+          match Parser.runParserCategory env `tacticSeq1Indented params.originalByBlockContent with
+          | .ok seq => .ok seq
+          | .error _ =>
+            -- 尝试直接把原文当成 term（可能是完整的 `by ...`）
+            match Parser.runParserCategory env `term params.originalByBlockContent with
+            | .ok t =>
+              match findTacticSeqChild t with
+              | some seq => .ok seq
+              | none => .error "No tacticSeq child in term"
+            | .error _ => .error "ParseError"
+        match trySeq with
+        | .error e => return { success := false, errorMsg := some e }
+        | .ok seqNew =>
+          -- Pretty print via Lean formatter, then splice back at recorded范围（补 by 头）
           let body ← (r.ctxInfo).runMetaM {} do
             formatTacticSeq seqNew
           let contRange := params.blockRange
-          let baseIndent := String.mk (List.replicate contRange.start.character ' ')
-          let mkIndented (indent : String) (s : String) : String :=
-            let parts := s.splitOn "\n"
-            parts.foldl (fun acc ln => if acc.isEmpty then indent ++ ln else acc ++ "\n" ++ indent ++ ln) ""
-          let replacementSeg := "\n" ++ mkIndented baseIndent body
-          let replaceStartUtf8 := text.lspPosToUtf8Pos contRange.start
-          let replaceStopUtf8  := text.lspPosToUtf8Pos contRange.stop
-          let src := text.source
-          let pre := src.extract ⟨0⟩ replaceStartUtf8
-          let suf := src.extract replaceStopUtf8 src.endPos
-          let newFull := pre ++ replacementSeg ++ suf
-          let fullRange : RangeDto := { start := { line := 0, character := 0 }, stop := text.utf8PosToLspPos src.endPos }
+          let baseIndent := String.mk (List.replicate (contRange.start.character + 2) ' ')
+          let replacementSeg := makeReplacementSeg true baseIndent body
+          let (newFull, fullRange) := spliceWholeFile text contRange replacementSeg
           return { success := true, newText := newFull, range := fullRange }
 
 end MathEye

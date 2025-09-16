@@ -14,12 +14,11 @@ import { CursorMode } from './types/cursorModes';
  */
 export function activate(context: vscode.ExtensionContext) {
     console.log('MathEye Proof Builder is now active!');
-    vscode.window.showInformationMessage('DEBUG: 扩展已重新加载');
 
     const outputChannel = vscode.window.createOutputChannel("MathEye");
 
-    // Preflight: ensure Lean side is built before user interaction in Dev Host
-    (async () => {
+    // Preflight：默认开启；设置 MATHEYE_PREFLIGHT=0 可禁用
+    if (process.env.MATHEYE_PREFLIGHT !== '0') (async () => {
         try {
             const cp = require('child_process') as typeof import('child_process');
             const fs = require('fs') as typeof import('fs');
@@ -32,6 +31,13 @@ export function activate(context: vscode.ExtensionContext) {
             let repoRootGuess = candidates.find(p => fs.existsSync(path.join(p, 'MathEye.lean')));
             if (!repoRootGuess) repoRootGuess = path.resolve(__dirname, '..', '..');
             outputChannel.appendLine(`[Preflight] repoRoot=${repoRootGuess}`);
+            // Ensure LEAN_PATH contains our freshly built libs so the lean server inherits it after restart
+            try {
+                const libDir = path.join(repoRootGuess, '.lake/build/lib/lean');
+                const prev = process.env.LEAN_PATH || '';
+                process.env.LEAN_PATH = prev ? `${libDir}:${prev}` : libDir;
+                outputChannel.appendLine(`[Preflight] LEAN_PATH=${process.env.LEAN_PATH}`);
+            } catch {}
             // Run `lake build MathEye` at repo root; tolerate environments without lake
             outputChannel.appendLine('[Preflight] lake build MathEye...');
             await new Promise<void>((resolve) => {
@@ -41,17 +47,11 @@ export function activate(context: vscode.ExtensionContext) {
                 p.on('exit', () => resolve());
                 p.on('error', () => resolve());
             });
+            // 避免手工 lean 编译干扰，统一依赖 lake build 的产物
             // Try to restart Lean server if extension is present
             try { await vscode.commands.executeCommand('lean4.restartServer'); } catch {}
 
-            // Developer convenience: auto-open a default test file under test_cases so你不必手动点开
-            try {
-                const testFile = path.join(repoRootGuess, 'test_cases', 'test_01_basic_theorem.lean');
-                if (fs.existsSync(testFile)) {
-                    const doc = await vscode.workspace.openTextDocument(testFile);
-                    await vscode.window.showTextDocument(doc, { preview: false });
-                }
-            } catch {}
+            // 不再自动打开测试文件，避免打扰正常使用
         } catch (e) {
             outputChannel.appendLine(`[Preflight] skipped or failed: ${e}`);
         }
@@ -60,6 +60,16 @@ export function activate(context: vscode.ExtensionContext) {
     const isTest = process.env.MATHEYE_TEST_MODE === '1';
     const forceReal = process.env.MATHEYE_USE_REAL_RPC === '1';
     const useMock = isTest && !forceReal;
+    
+    // Debug client selection
+    try {
+        if (process.env.MATHEYE_TEST_MODE === '1') {
+            const p = require('path'); const fs = require('fs');
+            const logPath = p.resolve(__dirname, 'client_debug.log');
+            fs.appendFileSync(logPath, `Client selection: isTest=${isTest}, forceReal=${forceReal}, useMock=${useMock}, MATHEYE_USE_REAL_RPC=${process.env.MATHEYE_USE_REAL_RPC}\n`);
+        }
+    } catch {}
+    
     const leanClient: LeanClientService = useMock
       ? new (require('./test/mockLeanClient').MockLeanClientService)()
       : new LeanClientService(outputChannel);
@@ -84,23 +94,44 @@ export function activate(context: vscode.ExtensionContext) {
     let currentPosition: vscode.Position | undefined = undefined;
     let positionLocked: boolean = false;
 
-    // Register command: Insert have snippet via Lean RPC (AST-based)
-    // const insertHaveCmd = vscode.commands.registerCommand('matheye.insertHaveSnippet', async () => {
-    //     const editor = vscode.window.activeTextEditor;
-    //     if (!editor) return;
-    //     if (!isTest && editor.document.languageId !== 'lean4') {
-    //         vscode.window.showWarningMessage('This command works with Lean 4 files only');
-    //         return;
-    //     }
-    //     vscode.window.showInformationMessage('Insert Have Snippet (free-form) 已禁用：请使用“Insert Have (Admit/Deny)”以保持 AST-only 精确编辑。');
-    // });
+    // 不再注册 insertHaveSnippet（避免混淆，仅保留 AST-only 路径）
 
     // Quick actions: Insert have by action (admit/deny) via server AST path
-    /*
+    // 防并发：避免一次测试内重入触发导致多次插入/覆盖
+    let insertInProgress = false;
+    // Try to find a [cursor] placeholder, remove it, and set the editor selection accordingly
+    async function consumeCursorPlaceholder(editor: vscode.TextEditor): Promise<void> {
+        const doc = editor.document;
+        const text = doc.getText();
+        const m = /\[cursor[^\]]*\]/i.exec(text);
+        if (!m) return;
+        const idx = m.index;
+        // Compute position from raw offset
+        const before = text.slice(0, idx);
+        const line = before.split(/\r?\n/).length - 1;
+        const col = before.length - (before.lastIndexOf('\n') + 1);
+        const pos = new vscode.Position(line, col);
+        const edit = new vscode.WorkspaceEdit();
+        edit.delete(doc.uri, new vscode.Range(pos, new vscode.Position(line, col + m[0].length)));
+        await vscode.workspace.applyEdit(edit);
+        try { await doc.save(); } catch {}
+        editor.selection = new vscode.Selection(pos, pos);
+    }
+
     const insertHaveAdmit = vscode.commands.registerCommand('matheye.insertHaveAdmit', async () => {
         const editor = vscode.window.activeTextEditor; if (!editor) return;
         if (!isTest && editor.document.languageId !== 'lean4') return;
-        try { require('fs').appendFileSync(require('path').resolve(__dirname, './ext_calls.log'), `insertHaveAdmit ${editor.document.uri} @ ${editor.selection.active.line}:${editor.selection.active.character}\n`); } catch {}
+        const userSelBefore = editor.selection.active;
+        try {
+            if (insertInProgress) {
+                try { require('fs').appendFileSync(require('path').resolve(__dirname, './insert_debug.log'), `SKIP admit: inProgress\n`); } catch {}
+                return;
+            }
+            insertInProgress = true;
+        } catch {}
+        // If user placed a [cursor] marker in the file, consume it and set selection
+        try { await consumeCursorPlaceholder(editor); } catch {}
+        try { if (process.env.MATHEYE_TEST_MODE === '1') require('fs').appendFileSync(require('path').resolve(__dirname, './ext_calls.log'), `insertHaveAdmit ${editor.document.uri} @ ${editor.selection.active.line}:${editor.selection.active.character}\n`); } catch {}
         // In real RPC mode, give Lean server a brief moment to be ready
         if (process.env.MATHEYE_USE_REAL_RPC === '1') {
             // 放宽等待窗口，避免VS Code测试宿主安装/激活lean4扩展的竞态
@@ -111,7 +142,23 @@ export function activate(context: vscode.ExtensionContext) {
         }
         // Ensure imports/macros first, then re-anchor
         await codeModifier.ensureImportsAndMacros(editor.document);
-        // Try to anchor inside the exact by-block to avoid seam positions around '|' and '=>'
+        // 触发一次 elaboration，确保 InfoTree 已建立（避免 0:0 处尚未建树导致 RPC 无法定位）
+        try {
+            const probePos = new vscode.Position(Math.min(editor.document.lineCount - 1, 4), 0);
+            await leanClient.getProofGoals(probePos, editor.document);
+            await new Promise(r => setTimeout(r, 200));
+        } catch {}
+        // 等待 RPC 方法+版本（BUILD_TAG）可用，避免仅检查进程存活
+        try {
+            for (let i = 0; i < 30; i++) {
+                try {
+                    const probe = await leanClient.getByBlockRange(editor.selection.active, editor.document);
+                    if (probe && probe.buildTag === 'NO_PROBE_VER_1') break;
+                } catch {}
+                await new Promise(r => setTimeout(r, 200));
+            }
+        } catch {}
+        // 逻辑锚点完全交由服务器 AST 决定（不做任何字符串级定位）
         let pos = editor.selection.active;
         let byRange: vscode.Range | undefined = undefined;
         let includeByOnSeq = false;
@@ -132,58 +179,24 @@ export function activate(context: vscode.ExtensionContext) {
             } catch {}
             if (br.success && br.range) {
                 const kindStr = (br as any).syntaxKind || '';
-                // Use precise context detection: only wrap with `by` in term context
-                if (kindStr && !String(kindStr).startsWith('Lean.Parser.Tactic.')) {
-                    // 容器是 term（如 byTactic）— 需要补 `by`
-                    byRange = br.range;
-                    includeByOnSeq = true;
-                } else if (br.isTacticContext) {
-                    // Already in tactic context - insert tactics directly (never include `by`)
-                    if (br.isMatchAlt) {
-                        // Inside match alternative - position after '=>'
-                        const line = br.range.start.line;
-                        const txt = editor.document.lineAt(line).text;
-                        const arrow = txt.indexOf('=>');
-                        if (arrow >= 0) {
-                            const hasSpace = txt.slice(arrow + 2).startsWith(' ');
-                            pos = new vscode.Position(line, arrow + 2 + (hasSpace ? 1 : 0));
-                            const br2 = await leanClient.getByBlockRange(pos, editor.document);
-                            byRange = br2.success ? br2.range : br.range;
-                            includeByOnSeq = false; // tactic context
-                        } else {
-                            byRange = br.range;
-                            includeByOnSeq = false; // tactic context
-                        }
-                    } else {
-                        // Regular tactic context (inside by-block)
-                        byRange = br.range;
-                        includeByOnSeq = false; // tactic context
-                    }
-                } else {
-                    // In term context - need to wrap with 'by'
-                    byRange = br.range;
-                    includeByOnSeq = true;
-                }
+                const isTactic = !!(kindStr && String(kindStr).startsWith('Lean.Parser.Tactic.'));
+                byRange = br.range;
+                includeByOnSeq = !isTactic;
+                // 不重置 pos，保留用户实际光标；seam 处理交由服务端 getInsertionPoint
             }
         } catch {}
         // Snap to canonical insertion point以避免缝隙；然后再次拉取 by 块范围（更稳定）
         try { pos = await leanClient.getInsertionPoint(pos, editor.document); } catch {}
         try {
             let br2 = await leanClient.getByBlockRange(pos, editor.document);
-            for (let i = 0; i < 10 && (!br2.success || !br2.range); i++) {
-                await new Promise(r => setTimeout(r, 120));
-                br2 = await leanClient.getByBlockRange(pos, editor.document);
-            }
             if (br2.success && br2.range) {
                 const kindStr2 = (br2 as any).syntaxKind || '';
-                if (kindStr2 && !String(kindStr2).startsWith('Lean.Parser.Tactic.')) {
-                    byRange = br2.range;
-                    includeByOnSeq = true;
-                } else {
-                    byRange = br2.range;
-                    includeByOnSeq = false;
-                }
+                const isTactic2 = !!(kindStr2 && String(kindStr2).startsWith('Lean.Parser.Tactic.'));
+                byRange = br2.range;
+                includeByOnSeq = !isTactic2;
+                // 仍不重置 pos
             }
+                        // byRange 由服务器统一容器计算保证；此处不再做特判
         } catch {}
         // 调用 RPC（短轮询直到成功或超时），避免刚载入时类型/路径未就绪
         let res = await leanClient.insertHaveByAction(pos, editor.document, 'admit', byRange, includeByOnSeq, true);
@@ -196,7 +209,7 @@ export function activate(context: vscode.ExtensionContext) {
           }
         } catch {}
         // 不重试：失败即失败，避免不透明 fallback
-        if (!res.success || !res.newText || !res.range) return;
+        if (!res.success || !res.newText || !res.range) { insertInProgress = false; return; }
 
         // 仅允许整篇替换：要求服务器返回整文件范围
         const wholeRangeReturned = res.range.start.line === 0 && res.range.start.character === 0 && res.range.end.line >= editor.document.lineCount - 1;
@@ -206,11 +219,31 @@ export function activate(context: vscode.ExtensionContext) {
         const we = new vscode.WorkspaceEdit();
         const fullRange = new vscode.Range(0, 0, editor.document.lineCount, 0);
         we.replace(editor.document.uri, fullRange, res.newText);
-        await vscode.workspace.applyEdit(we);
+        const applied = await vscode.workspace.applyEdit(we);
+        try { editor.selection = new vscode.Selection(userSelBefore, userSelBefore); } catch {}
+        try {
+            if (process.env.MATHEYE_TEST_MODE === '1') {
+                const p = require('path'); const fs = require('fs');
+                const logPath = p.resolve(__dirname, 'insert_debug.log');
+                const txt = editor.document.getText();
+                fs.appendFileSync(logPath, `POST-APPLY admit: applied=${applied} len=${txt.length}\n${txt}\n`);
+            }
+        } catch {}
+        insertInProgress = false;
     });
     const insertHaveDeny = vscode.commands.registerCommand('matheye.insertHaveDeny', async () => {
         const editor = vscode.window.activeTextEditor; if (!editor) return;
         if (!isTest && editor.document.languageId !== 'lean4') return;
+        const userSelBefore = editor.selection.active;
+        try {
+            if (insertInProgress) {
+                try { require('fs').appendFileSync(require('path').resolve(__dirname, './insert_debug.log'), `SKIP deny: inProgress\n`); } catch {}
+                return;
+            }
+            insertInProgress = true;
+        } catch {}
+        // Support [cursor] placeholder for test convenience
+        try { await consumeCursorPlaceholder(editor); } catch {}
         // In real RPC mode, give Lean server a brief moment to be ready
         if (process.env.MATHEYE_USE_REAL_RPC === '1') {
             // 放宽等待窗口，避免VS Code测试宿主安装/激活lean4扩展的竞态
@@ -221,6 +254,16 @@ export function activate(context: vscode.ExtensionContext) {
         }
         // Ensure imports/macros first, then re-anchor
         await codeModifier.ensureImportsAndMacros(editor.document);
+        // 等待 RPC 方法+版本（BUILD_TAG）可用
+        try {
+            for (let i = 0; i < 30; i++) {
+                try {
+                    const probe = await leanClient.getByBlockRange(editor.selection.active, editor.document);
+                    if (probe && probe.buildTag === 'NO_PROBE_VER_1') break;
+                } catch {}
+                await new Promise(r => setTimeout(r, 200));
+            }
+        } catch {}
         let pos = editor.selection.active;
         let byRange: vscode.Range | undefined = undefined;
         let includeByOnSeq = false;
@@ -286,17 +329,18 @@ export function activate(context: vscode.ExtensionContext) {
             }
         } catch {}
         // 调用 RPC（短轮询直到成功或超时）
-        let res = await leanClient.insertHaveByAction(pos, editor.document, 'deny', byRange, includeByOnSeq, true);
+        // admit：插入 have + exact（肯定）
+        let res = await leanClient.insertHaveByAction(pos, editor.document, 'admit', byRange, includeByOnSeq, true);
         try {
           if (process.env.MATHEYE_TEST_MODE === '1') {
             const p = require('path'); const fs = require('fs');
             const logPath = p.resolve(__dirname, 'insert_debug.log');
             const brs = byRange ? `[${byRange.start.line}:${byRange.start.character}-${byRange.end.line}:${byRange.end.character}]` : 'none';
-            fs.appendFileSync(logPath, `deny@ ${pos.line}:${pos.character} byRange=${brs} includeBy=${includeByOnSeq} -> success=${res.success} range=${res.range ? `[${res.range.start.line}:${res.range.start.character}-${res.range.end.line}:${res.range.end.character}]` : 'none'} newText.len=${res.newText?.length ?? 0}\n`);
+            fs.appendFileSync(logPath, `admit@ ${pos.line}:${pos.character} byRange=${brs} includeBy=${includeByOnSeq} -> success=${res.success} range=${res.range ? `[${res.range.start.line}:${res.range.start.character}-${res.range.end.line}:${res.range.end.character}]` : 'none'} newText.len=${res.newText?.length ?? 0}\n`);
           }
         } catch {}
         // 不重试：失败即失败
-        if (!res.success || !res.newText || !res.range) return;
+        if (!res.success || !res.newText || !res.range) { insertInProgress = false; return; }
 
         // 仅允许整篇替换：要求服务器返回整文件范围
         const wholeRangeReturned = res.range.start.line === 0 && res.range.start.character === 0 && res.range.end.line >= editor.document.lineCount - 1;
@@ -306,7 +350,17 @@ export function activate(context: vscode.ExtensionContext) {
         const we = new vscode.WorkspaceEdit();
         const fullRange = new vscode.Range(0, 0, editor.document.lineCount, 0);
         we.replace(editor.document.uri, fullRange, res.newText);
-        await vscode.workspace.applyEdit(we);
+        const applied = await vscode.workspace.applyEdit(we);
+        try { editor.selection = new vscode.Selection(userSelBefore, userSelBefore); } catch {}
+        try {
+            if (process.env.MATHEYE_TEST_MODE === '1') {
+                const p = require('path'); const fs = require('fs');
+                const logPath = p.resolve(__dirname, 'insert_debug.log');
+                const txt = editor.document.getText();
+                fs.appendFileSync(logPath, `POST-APPLY admit: applied=${applied} len=${txt.length}\n${txt}\n`);
+            }
+        } catch {}
+        insertInProgress = false;
     });
 
     // Testing/utility: apply admit through CodeModifierService to record history
@@ -326,7 +380,7 @@ export function activate(context: vscode.ExtensionContext) {
         const editor = vscode.window.activeTextEditor; if (!editor) return;
         await codeModifier.rollbackOperation(editor.document);
     });
-    */
+
 
     // Register command: Start Proof Builder
     let startProofBuilderCommand = vscode.commands.registerCommand('matheye.startProofBuilder', async () => {
@@ -650,8 +704,10 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(
         startProofBuilderCommand,
-        // insertHaveCmd,
-        // standalone commands removed; unified via WebView
+        insertHaveAdmit,
+        insertHaveDeny,
+        insertHaveAdmitWithHistory,
+        rollbackCurrentBlock,
         astTestCommand,
         onActiveEditorChange,
         onSelectionChange,

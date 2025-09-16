@@ -6,33 +6,33 @@
 - 架构分层：
   - VSCode 扩展负责：
     - 命令入口：`matheye.insertHaveAdmit` / `matheye.insertHaveDeny`；
-    - 先用 `getByBlockRange` 精确定位当前 by/分支容器范围，并随 RPC 一起传入；
-    - 应用 Lean 端返回的最小范围 `TextEdit`（容器子树），不做二次字符串加工。
+    - 依赖 `getByBlockRange` 返回的 by 容器范围，将调用点对齐到 `byRange.start` 作为锚点；
+    - 仅做导入与宏注入（缺则补齐）；不做字符串级“找 by/找 =>”与范围探针；
+    - 应用 Lean 端返回的整篇替换文本；缩进/换行交由 PrettyPrinter。
   - Lean 端（`MathEye.lean`）负责：
     - 核心 RPC：`insertHaveByAction`（唯一生产入口，支持 `blockRange?`）；
-    - 容器：优先使用扩展传入的 by 块范围确定容器；否则退回语法路径选择 tacticSeq；
-    - 稳定锚点：在容器内靠前合法位置（避开 `|/=>` seam）读取目标类型；
-    - AST 编辑：保留 stablePos 之前的所有 tactics（prefix），整体裁剪其后，然后追加 have/exact；重建 `tacticSeq1Indented`；
-    - Pretty 打印正文并按“容器起始列”做固定缩进嵌入；
-    - 查询辅助：`getByBlockRange`（返回当前 by/战术容器范围）。
+    - 统一容器/范围决策：在服务端基于 InfoTree AST 选择 by 容器与范围；
+    - AST 编辑：保留 stablePos 之前的战术，整体裁剪其后，然后追加 have/exact，重建 `tacticSeq1Indented`；
+    - Pretty 打印正文并按容器起始列缩进；返回整篇替换文本；
+    - 查询辅助：`getByBlockRange`（返回当前 by 容器/战术容器范围与上下文信息）。
 
 - 关键不变式：
   - 仅做 AST 层面编辑；不做字符串级替换/拼接；
-  - 容器确定性：优先以客户端传入范围为准；
-  - 使用稳定锚点 `stablePos`（容器内部）获取目标类型，避免 seam 位置造成的 metavariable 失配；
-  - 从 stablePos 到容器末尾整体裁剪，避免重复 have/exact；
-  - 无 fallback：若无法安全读取类型，直接返回失败（不使用 `_` 等退路）；
-  - Pretty 打印 + 固定列缩进嵌入；非 `tacticSeq` 容器（如 `=> rfl`）返回“`=>` 后换行 + 缩进正文”的统一形态（不拼接 `by` 关键字）。
+  - 容器确定性：容器/范围由服务端 AST 统一决策；
+  - 快照稳定：用“文件末尾位置”获得完整 InfoTree，再以调用点 `pos` 作为查询点进行容器选择；
+  - 无不透明回退：类型读取失败即报错，不用 `_` 或字符串修补；
+  - 从 stablePos 到容器末尾整体裁剪，杜绝重复 have/exact；
+  - Pretty 打印 + 固定列缩进；内联 `rfl` 等非 `tacticSeq` 容器会被转换为“`by` 块 + 缩进正文”的统一形态。
 
 ## VSCode 扩展端
 - 文件：`extension/src/extension.ts`
 - 命令：
   - `matheye.insertHaveAdmit` / `matheye.insertHaveDeny`
     - 如处于真实测试模式，会等待 Lean Server ready（最多 ~2.25s，15×150ms）。
-    - 通过 `LeanClientService.getByBlockRange(pos)` 获取当前 by/分支容器范围；
-    - 将调用位置锚定到该行的 `=>` 后（考虑 `=>` 后是否有空格），从而避开 `|/=>` 接缝；
-    - 调用 `LeanClientService.insertHaveByAction(pos, action)`；
-    - 将返回的 `{ range, newText }` 作为一个 `WorkspaceEdit` 应用（最小替换，无二次加工）。
+    - 通过 `LeanClientService.getByBlockRange(pos)` 获取 by 容器范围；
+    - 将调用位置对齐为 `byRange.start`（完全使用 RPC 的 AST 结果）；
+    - 调用 `LeanClientService.insertHaveByAction(pos, action, byRange, includeByOnSeq?, returnWholeFile=true)`；
+    - 将返回的整篇文本作为 `WorkspaceEdit` 应用（整篇替换，无二次加工）。
 
 - Lean 客户端：`extension/src/services/leanClient.ts`
   - `insertHaveByAction`：
@@ -51,11 +51,12 @@
 - 签名：
   - 输入：`{ pos : Lsp.Position, action : String, blockRange? : RangeDto }`，其中 `action ∈ { "admit", "deny" }`；
   - 输出：`{ success, range, newText, errorMsg? }`；
-- 流程：
-  1. 读取语法路径 `results`；若客户端传入 `blockRange`，优先使用该范围确定容器，否则按路径选择包含关系最大的 tacticSeq 作为容器。
-  2. 在容器内部选择稳定锚点 `stablePos`（靠前且合法），再以该帧 `ctxInfo` 读取目标类型（失败则返回错误）。
-  3. AST 重写：保留 stablePos 之前的 tactics，整体裁剪其后，解析并追加 have/exact，重建 `tacticSeq1Indented`。
-  4. Pretty 打印正文，按“容器起始列”统一缩进；若容器非 `tacticSeq`，返回“`\n` + 缩进正文”。
+-- 流程：
+  1. 以“文件末尾位置”获取完整 InfoTree 快照，使用 `pos` 作为查询点；
+  2. 若 `goalsAt?` 为空：在全树收集 `byTactic` 并用“最近起点”规则选择 by 容器；否则按路径从 term 路径选中 by 容器；
+  3. 在 by 容器内部选择稳定锚点 `stablePos`，以 `g.withContext` 读取目标类型并 pretty；
+  4. AST 重写：保留 stablePos 之前的 tactics，整体裁剪其后，解析并追加 have/exact，重建 `tacticSeq1Indented`；
+  5. Pretty 打印正文并按容器起始列缩进；返回整篇替换文本。
   4. 目标类型与 snippet 构造：
      - 在 `rStable` 的上下文中取得目标类型 `ty` 并 pretty-print 成 `tyStr`；
      - 生成变量名 `h_{line}_{character}`；
@@ -82,9 +83,10 @@
 ## Lean 端 RPC：getByBlockRange
 - 用途：客户端结构化定位 by/分支容器范围，避免把光标放在 `|/=>` 接缝。
 - 流程：
-  - 从 `pos` → `hoverPos`，`goalsAt?` 得到路径；
-  - 按容器选择规则选中 `tacticSeq` 容器（或退回当前战术节点）；
-  - 返回其 `range`（LSP 坐标），供客户端定位。
+  - 用“文件末尾位置”获取完整 InfoTree；
+  - tactic 路径命中时，从 term 路径选中最小 `byTactic` 容器，范围为 `by.start → 子 tacticSeq 最右 stop`；
+  - tactic 路径未命中时，收集全文件 `byTactic` 并用“最近起点”规则选取；
+  - 返回 `range`、`syntaxKind`、`isTacticContext`/`isTermContext` 等信息。
 
 ## 生成文本的统一规格
 - 容器为 `tacticSeq`：直接替换块体，`body` 按容器起始列缩进，每条 tactic 单独一行；
@@ -107,7 +109,7 @@
     - 使用 VSIX：`MATHEYE_USE_REAL_RPC=1 MATHEYE_LEAN4_VSIX=/abs/path/leanprover.lean4-*.vsix npm run test:integration`
     - 预置扩展目录（推荐本仓做法）：将本机已安装的 lean4 扩展目录软链到 `extension/out/.vscode-test/extensions/`
       - 例：`ln -s ~/.cursor/extensions/leanprover.lean4-0.0.209-universal extension/out/.vscode-test/extensions/`
-- 覆盖点：光标在 `|` 前、`=>` 后（含/不含空格）、已有 rfl/已有 have 的分支、重复 admit/deny 等；
+- 覆盖点：光标在 `|` 前、`=>` 后（含/不含空格）、inline `:= by rfl`、已有 have 的分支、重复 admit/deny 等；
 - 断言：头部合法（`=>` 后换行或 `=> by`）、rfl 被裁剪、不重复 have/exact、`lake env lean` 编译通过。
 
 ## 与已弃用（dev-only/原型）接口的关系

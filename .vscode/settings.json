@@ -1,10 +1,7 @@
 {
     "lean4.projectRoot": ".",
     "lean4.toolchainPath": "",
-    "lean4.serverArgs": ["--server"],
-    "lean4.serverEnv": {
-        "LEAN_PATH": ""
-    },
+    "lean4.lakeEnabled": true,
     "lean4.infoViewAutoOpen": true,
     "lean4.infoViewAutoOpenShowGoal": true,
     "files.associations": {

@@ -6,6 +6,15 @@ import { execSync } from 'child_process';
 async function main() {
   try {
     process.env.MATHEYE_TEST_MODE = '1';
+    // Ensure PATH contains elan toolchain binaries (lake/lean) for test host
+    try {
+      const home = process.env.HOME || process.env.USERPROFILE || '';
+      const elanBin = home ? `${home}/.elan/bin` : '';
+      if (elanBin) {
+        const prev = process.env.PATH || '';
+        if (!prev.split(':').includes(elanBin)) process.env.PATH = `${elanBin}:${prev}`;
+      }
+    } catch {}
     // point to the extension root (package.json)
     const extensionDevelopmentPath = path.resolve(__dirname, '../../..');
     // point to compiled test runner index.js
@@ -13,13 +22,14 @@ async function main() {
 
     // Ensure Lean RPC server side (MathEye) is freshly built for the test host.
     // Build at the repository root so the VSCode test instance sees up-to-date .olean files.
-    try {
-      const repoRoot = path.resolve(extensionDevelopmentPath, '..');
-      execSync('lake build MathEye', { stdio: 'inherit', cwd: repoRoot });
-    } catch (e) {
-      // Allow tests to proceed; failures will surface in cases that require the RPC.
-      console.warn('Warning: lake build MathEye failed before integration tests:', e);
-    }
+    // 强制最新 .olean：先尝试 lake，再无条件用 lean 直接编译并清理 .hash，确保测试宿主加载最新版本
+    const repoRoot = path.resolve(extensionDevelopmentPath, '..');
+    // 可选清理：仅在需要强制重建时开启（避免每次都慢）
+    try { if (process.env.MATHEYE_FORCE_CLEAN === '1') execSync('lake clean', { stdio: 'inherit', cwd: repoRoot }); } catch {}
+    // 确保依赖（如 mathlib）已获取并构建，避免首次导入过期；若无变更，这两步基本为 no-op
+    try { execSync('lake update', { stdio: 'inherit', cwd: repoRoot }); } catch {}
+    try { execSync('lake build', { stdio: 'inherit', cwd: repoRoot }); } catch {}
+    // 不再执行手工 lean 编译，避免与 lake 产物冲突
 
     // Download VS Code for tests; install Lean4 only when using real RPC
     const vscodeExecutablePath = await downloadAndUnzipVSCode('stable');
@@ -31,6 +41,31 @@ async function main() {
     const userDataDir = path.join(shortBase, 'ud');
     try { fs.mkdirSync(extDir, { recursive: true }); } catch {}
     try { fs.mkdirSync(userDataDir, { recursive: true }); } catch {}
+    // Write user settings to force lake usage and set logging (both custom and default test dirs)
+    try {
+      const userSettingsDir = path.join(userDataDir, 'User');
+      fs.mkdirSync(userSettingsDir, { recursive: true });
+      const settingsPath = path.join(userSettingsDir, 'settings.json');
+      const wrapper = path.resolve(extensionDevelopmentPath, 'scripts', 'lean_server_wrapper.sh');
+      const settings = {
+        'lean4.lakeEnabled': true,
+        'matheye.logLevel': 'debug',
+        // Force server executable to our lake-wrapped launcher
+        'lean4.executablePath': wrapper,
+        // Avoid unknown toolchain path surprises; rely on elan default
+        'lean4.toolchainPath': ''
+      } as any;
+      try { fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8'); } catch {}
+      // Dump for debugging
+      // no debug dump
+      // Also write to VS Code test harness default location to be safe (under extension/.vscode-test)
+      try {
+        const defaultUserDir = path.resolve(extensionDevelopmentPath, '.vscode-test/user-data/User');
+        fs.mkdirSync(defaultUserDir, { recursive: true });
+        const fallbackSettings = path.join(defaultUserDir, 'settings.json');
+        fs.writeFileSync(fallbackSettings, JSON.stringify(settings, null, 2), 'utf8');
+      } catch {}
+    } catch {}
 
     // Migrate any pre-populated assets from the legacy extensions dir into the short extDir
     try {
@@ -127,29 +162,55 @@ async function main() {
           '--extensions-dir', extDir,
           '--user-data-dir', userDataDir,
           '--install-extension', localVsix,
-          path.resolve(__dirname, '../../..'),
+          path.resolve(extensionDevelopmentPath, '..'),
         ];
       } else {
         launchArgs = [
           '--extensions-dir', extDir,
           '--user-data-dir', userDataDir,
           '--install-extension', 'leanprover.lean4',
-          path.resolve(__dirname, '../../..'),
+          path.resolve(extensionDevelopmentPath, '..'),
         ];
       }
     } else {
       launchArgs = [
         '--extensions-dir', extDir,
         '--user-data-dir', userDataDir,
-        path.resolve(__dirname, '../../..'),
+        path.resolve(extensionDevelopmentPath, '..'),
       ];
     }
+
+    // Ensure LEAN_PATH includes ALL lake package libs (project + dependencies)
+    try {
+      const repoRoot2 = path.resolve(extensionDevelopmentPath, '..');
+      const parts: string[] = [];
+      const addIfDir = (p: string) => { try { if (require('fs').statSync(p).isDirectory()) parts.push(p); } catch {} };
+      // project lib
+      addIfDir(path.resolve(repoRoot2, '.lake/build/lib/lean'));
+      // dependencies libs
+      const pkgsRoot = path.resolve(repoRoot2, '.lake/packages');
+      try {
+        const pkgs = require('fs').readdirSync(pkgsRoot);
+        for (const name of pkgs) {
+          addIfDir(path.resolve(pkgsRoot, name, '.lake/build/lib/lean'));
+        }
+      } catch {}
+      const prev = process.env.LEAN_PATH || '';
+      const combined = parts.join(':');
+      process.env.LEAN_PATH = prev ? `${combined}:${prev}` : combined;
+    } catch {}
 
     await runTests({ 
       vscodeExecutablePath,
       extensionDevelopmentPath, 
       extensionTestsPath, 
-      extensionTestsEnv: { MATHEYE_TEST_MODE: '1', MATHEYE_USE_REAL_RPC: process.env.MATHEYE_USE_REAL_RPC || '' } as any,
+      extensionTestsEnv: {
+        MATHEYE_TEST_MODE: '1',
+        MATHEYE_USE_REAL_RPC: process.env.MATHEYE_USE_REAL_RPC || '',
+        LEAN_PATH: process.env.LEAN_PATH || '',
+        PATH: process.env.PATH || '',
+        HOME: process.env.HOME || process.env.USERPROFILE || ''
+      } as any,
       launchArgs
     });
   } catch (err) {

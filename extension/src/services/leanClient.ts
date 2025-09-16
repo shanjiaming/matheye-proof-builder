@@ -159,6 +159,15 @@ export class LeanClientService {
         const client = await this.getLeanClient();
         const uri = document.uri.toString();
         
+        // Debug logging at entry
+        try {
+            if (process.env.MATHEYE_TEST_MODE === '1') {
+                const p = require('path'); const fs = require('fs');
+                const logPath = p.resolve(__dirname, '..', 'rpc_debug.log');
+                fs.appendFileSync(logPath, `[insertHaveByAction] ENTRY @ ${position.line}:${position.character} action=${action}\n`);
+            }
+        } catch {}
+        
         const call = async () => {
             const sessionId = (await client.sendRequest("$/lean/rpc/connect", { uri })).sessionId;
             const params: any = {
@@ -193,10 +202,17 @@ export class LeanClientService {
                 if (process.env.MATHEYE_TEST_MODE === '1') {
                     const p = require('path'); const fs = require('fs');
                     const logPath = p.resolve(__dirname, '..', 'rpc_debug.log');
-                    fs.appendFileSync(logPath, `insertHaveByAction @ ${position.line}:${position.character} -> ${JSON.stringify(result)}\n`);
+                    fs.appendFileSync(logPath, `[insertHaveByAction] RESULT @ ${position.line}:${position.character} -> ${JSON.stringify(result)}\n`);
                 }
             } catch {}
             
+            if (process.env.MATHEYE_TEST_MODE === '1') {
+                try {
+                    const p = require('path'); const fs = require('fs');
+                    const logPath = p.resolve(__dirname, '..', 'rpc_debug.log');
+                    fs.appendFileSync(logPath, `[insertHaveByAction] BUILD_TAG=${result?.buildTag || ''}\n`);
+                } catch {}
+            }
             if (result && result.success) {
                 const rg = result.range;
                 const range = new vscode.Range(
@@ -211,6 +227,14 @@ export class LeanClientService {
         try {
             return await call();
         } catch (e: any) {
+            // Debug logging for exceptions
+            try {
+                if (process.env.MATHEYE_TEST_MODE === '1') {
+                    const p = require('path'); const fs = require('fs');
+                    const logPath = p.resolve(__dirname, '..', 'rpc_debug.log');
+                    fs.appendFileSync(logPath, `[insertHaveByAction] EXCEPTION @ ${position.line}:${position.character} -> ${String(e)}\n`);
+                }
+            } catch {}
             return { success: false, errorMsg: String(e) };
         }
     }
@@ -221,7 +245,7 @@ export class LeanClientService {
     async getByBlockRange(
         position: vscode.Position, 
         document: vscode.TextDocument
-    ): Promise<{success: boolean, range?: vscode.Range, isTacticContext?: boolean, isTermContext?: boolean, isMatchAlt?: boolean, syntaxKind?: string, errorMsg?: string}> {
+    ): Promise<{success: boolean, range?: vscode.Range, isTacticContext?: boolean, isTermContext?: boolean, isMatchAlt?: boolean, syntaxKind?: string, errorMsg?: string, buildTag?: string}> {
         const client = await this.getLeanClient();
         const uri = document.uri.toString();
         
@@ -245,7 +269,8 @@ export class LeanClientService {
                     const rg = result && result.range ? `[${result.range.start.line}:${result.range.start.character}-${result.range.stop.line}:${result.range.stop.character}]` : 'none';
                     const parentKinds = Array.isArray(result?.parentKinds) ? JSON.stringify(result.parentKinds) : '[]';
                     fs.appendFileSync(logPath,
-                        `[getByBlockRange] @ ${position.line}:${position.character} -> success=${!!(result && result.success)} range=${rg} syntax=${result?.syntaxKind} isTactic=${result?.isTacticContext} isTerm=${result?.isTermContext} isMatchAlt=${result?.isMatchAlt} parentKinds=${parentKinds}\n`
+                        `[getByBlockRange] @ ${position.line}:${position.character} -> success=${!!(result && result.success)} range=${rg} syntax=${result?.syntaxKind} isTactic=${result?.isTacticContext} isTerm=${result?.isTermContext} isMatchAlt=${result?.isMatchAlt} parentKinds=${parentKinds}\n` +
+                        `[getByBlockRange] BUILD_TAG=${result?.buildTag || ''}\n`
                     );
                 }
             } catch {}
@@ -262,10 +287,11 @@ export class LeanClientService {
                     isTacticContext: result.isTacticContext,
                     isTermContext: result.isTermContext,
                     isMatchAlt: result.isMatchAlt,
-                    syntaxKind: result.syntaxKind
+                    syntaxKind: result.syntaxKind,
+                    buildTag: result.buildTag
                 };
             }
-            return { success: false, errorMsg: result?.errorMsg || 'unknown error' };
+            return { success: false, errorMsg: result?.errorMsg || 'unknown error', buildTag: result?.buildTag };
         } catch (e: any) {
             try {
                 if (process.env.MATHEYE_TEST_MODE === '1') {

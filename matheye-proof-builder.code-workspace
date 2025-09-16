@@ -6,10 +6,7 @@
     ],
     "settings": {
         "lean4.toolchainPath": "",
-        "lean4.serverArgs": [],
-        "lean4.serverEnv": {
-            "LEAN_PATH": ""
-    },
+        "lean4.lakeEnabled": true,
     "files.associations": {
       "*.lean": "lean4"
     },

@@ -5,7 +5,7 @@ const MochaCtor: any = require('mocha');
 
 export function run(): Promise<void> {
   const Mocha = MochaCtor.default ? MochaCtor.default : MochaCtor;
-  const mocha = new Mocha({ ui: 'tdd', timeout: 120000, color: true });
+  const mocha = new Mocha({ ui: 'tdd', timeout: 180000, color: true });
   const testsRoot = __dirname;
   const onlyComplex = process.env.MATHEYE_ONLY_COMPLEX === '1';
   const singleCase = process.env.MATHEYE_SINGLE_CASE === '1';

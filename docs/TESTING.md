@@ -38,6 +38,24 @@ ln -s ~/.cursor/extensions/leanprover.lean4-0.0.209-universal \
 cd extension && MATHEYE_USE_REAL_RPC=1 npm run test:integration
 ```
 
+### 选择性加载测试套件（无需修改 .only）
+
+- 仅运行复杂容器用例：
+  ```bash
+  cd extension
+  MATHEYE_USE_REAL_RPC=1 MATHEYE_ONLY_COMPLEX=1 npm run test:integration
+  ```
+- 仅运行单文件自检套件：
+  ```bash
+  cd extension
+  MATHEYE_USE_REAL_RPC=1 MATHEYE_SINGLE_CASE=1 npm run test:integration
+  ```
+
+### 关于 Preflight（扩展激活时的 lake 构建）
+
+- 默认开启：扩展激活后会执行一次 `lake build MathEye` 并尝试重启 Lean 服务器，以保证 RPC 与 .olean 同步。
+- 如需禁用（例如本地已提前构建好）：设置 `MATHEYE_PREFLIGHT=0` 再启动测试或扩展。
+
 ### 实际覆盖点
 - 光标在 `|` 前、在 `=>` 后（含/不含空格）；
 - 分支已有 `rfl` 或已有 `have/exact`，再次 admit/deny；
@@ -52,4 +70,3 @@ cd extension && MATHEYE_USE_REAL_RPC=1 npm run test:integration
 - VSCode CLI 路径含空格已在测试 runner 适配；
 - 如 VSCode 会话报 “closed file”，runner 会尝试确保文档可见并重试；
 - 输出日志：`extension/out/test/suite/mocha_results.log`、`extension/out/test/suite/rpc_debug.log`。
-

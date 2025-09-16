@@ -94,6 +94,31 @@
         "command": "matheye.startProofBuilder",
         "title": "Start Proof Builder",
         "category": "MathEye"
+      },
+      {
+        "command": "matheye.insertHaveAdmit",
+        "title": "Insert Have (Admit)",
+        "category": "MathEye"
+      },
+      {
+        "command": "matheye.insertHaveDeny", 
+        "title": "Insert Have (Deny)",
+        "category": "MathEye"
+      },
+      {
+        "command": "matheye.insertHaveAdmitWithHistory",
+        "title": "Insert Have (Admit with History)", 
+        "category": "MathEye"
+      },
+      {
+        "command": "matheye.rollbackCurrentBlock",
+        "title": "Rollback Current Block",
+        "category": "MathEye"
+      },
+      {
+        "command": "matheye.testASTRoundTrip",
+        "title": "Test AST Round Trip",
+        "category": "MathEye"
       }
     ],
     "menus": {
@@ -120,7 +145,8 @@
     "test:unit": "npm run compile && node ./node_modules/mocha/bin/mocha.js ./out/test/leanClient.unit.spec.js --reporter spec --exit && node ./node_modules/mocha/bin/mocha.js ./out/test/codeModifier.unit.spec.js --reporter spec --exit && node ./node_modules/mocha/bin/mocha.js ./out/test/historyManager.unit.spec.js --reporter spec --exit && node ./node_modules/mocha/bin/mocha.js ./out/test/leanClient.rpc.unit.spec.js --reporter spec --exit",
     "test:integration": "npm run compile && node ./out/test/suite/runTest.js",
     "test:integration:real": "npm run compile && MATHEYE_TEST_MODE=1 MATHEYE_USE_REAL_RPC=1 node ./out/test/suite/runTest.js",
-    "test:integration:tactic": "npm run compile && MATHEYE_TEST_MODE=1 MATHEYE_USE_REAL_RPC=1 MATHEYE_ONLY_COMPLEX=1 node ./out/test/suite/runTest.js"
+    "test:integration:tactic": "npm run compile && MATHEYE_TEST_MODE=1 MATHEYE_USE_REAL_RPC=1 MATHEYE_ONLY_COMPLEX=1 node ./out/test/suite/runTest.js",
+    "real:headless": "node ../scripts/real_rpc_test.js --mode current"
   },
   "dependencies": {
     "@types/node": "^18.x",

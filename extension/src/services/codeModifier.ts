@@ -75,11 +75,11 @@ export class CodeModifierService {
             let byBlockInfo = logicalCursor.byBlock 
                 ? {
                     range: new vscode.Range(
-                        new vscode.Position(logicalCursor.byBlock.startPosition.line, 0),
+                        logicalCursor.byBlock.startPosition,
                         logicalCursor.byBlock.endPosition
                     ),
                     content: document.getText(new vscode.Range(
-                        new vscode.Position(logicalCursor.byBlock.startPosition.line, 0),
+                        logicalCursor.byBlock.startPosition,
                         logicalCursor.byBlock.endPosition
                     ))
                 }
@@ -115,8 +115,14 @@ export class CodeModifierService {
             let insertPos = logicalCursor.position;
             try { insertPos = await this.leanClient.getInsertionPoint(insertPos, document); } catch {}
             // 统一为整文件替换：请求服务器直接返回整篇文本，避免局部替换导致快照漂移
+            this.outputChannel.appendLine(`[DEBUG] insertHaveByAction insertPos=${insertPos.line}:${insertPos.character}, action=${action}, byRange=${JSON.stringify(byRange)} includeByOnSeq=${includeByOnSeq}`);
             const resp = await this.leanClient.insertHaveByAction(insertPos, document, action, byRange, includeByOnSeq, true);
-            if (!resp.success) throw new Error(resp.errorMsg || 'Lean RPC insert failed');
+            if (!resp.success) {
+                const errorMsg = resp.errorMsg || 'Lean RPC insert failed';
+                this.outputChannel.appendLine(`[ERROR] insertHaveByAction failed: ${errorMsg}`);
+                console.log(`[ERROR] insertHaveByAction failed: ${errorMsg}`);
+                throw new Error(errorMsg);
+            }
             // Capture replaced文本（用于历史记录）：若返回整文件范围，则用全文；否则用局部片段
             const wholeRangeReturned = resp.range
               && resp.range.start.line === 0 && resp.range.start.character === 0
@@ -316,20 +322,6 @@ export class CodeModifierService {
             vscode.window.showErrorMessage(errorMsg);
             return false;
         }
-    }
-
-    /**
-     * 检查指定目标是否有历史记录可以回滚
-     */
-    canRollbackGoal(_goalIndex: number): boolean {
-        return false;
-    }
-
-    /**
-     * Check if rollback is available for a specific goal
-     */
-    canRollback(_goalIndex: number): boolean {
-        return false;
     }
 
     /**

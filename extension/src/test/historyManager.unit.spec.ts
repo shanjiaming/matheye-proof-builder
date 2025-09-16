@@ -1,8 +1,10 @@
-import { expect } from 'chai';
+import * as assert from 'assert';
 const mock = require('mock-require');
 import type * as vscode from 'vscode';
 
-class MockPosition { constructor(public line: number, public character: number) {}
+// Mock vscode API before importing the service under test
+class MockPosition { 
+  constructor(public line: number, public character: number) {}
   isBefore(other: vscode.Position): boolean { return this.line < other.line || (this.line === other.line && this.character < other.character); }
   isBeforeOrEqual(other: vscode.Position): boolean { return this.isBefore(other) || this.isEqual(other); }
   isAfter(other: vscode.Position): boolean { return !this.isBeforeOrEqual(other); }
@@ -11,7 +13,9 @@ class MockPosition { constructor(public line: number, public character: number) 
   translate(): any { return this; }
   with(): any { return this; }
 }
-class MockRange { constructor(public start: vscode.Position, public end: vscode.Position) {}
+
+class MockRange { 
+  constructor(public start: vscode.Position, public end: vscode.Position) {}
   get isEmpty() { return this.start.line === this.end.line && this.start.character === this.end.character; }
   get isSingleLine() { return this.start.line === this.end.line; }
   contains(_positionOrRange: any): boolean { return true; }
@@ -25,12 +29,16 @@ mock('vscode', {
   window: { createOutputChannel: () => ({ appendLine: (_: string) => {}, dispose: () => {} }) },
   Position: MockPosition,
   Range: MockRange,
+  TextEditorRevealType: { InCenterIfOutsideViewport: 0 },
+  workspace: { getConfiguration: () => ({ get: () => undefined }) },
 });
 
 import { HistoryManager, HistoryOperation } from '../services/historyManager';
 
+
+
 describe('HistoryManager', () => {
-  it('records, validates in block, and clears operations', async () => {
+  it('records and validates operations', async () => {
     const hm = new HistoryManager();
     const docUri = 'file:///test.lean';
     const byRange = new MockRange(new MockPosition(10, 0) as unknown as vscode.Position, new MockPosition(20, 0) as unknown as vscode.Position);
@@ -41,12 +49,7 @@ describe('HistoryManager', () => {
       byBlockRange: byRange as unknown as vscode.Range,
       originalByBlockContent: 'by\n  exact rfl\n',
       insertedText: inserted,
-      documentVersion: 1,
       byBlockStartLine: byRange.start.line,
-      insertRelStartLine: 0,
-      insertRelStartChar: 0,
-      insertRelEndLine: 1,
-      insertRelEndChar: 0,
       absStartLine: 18,
       absStartChar: 0,
       absEndLine: 19,
@@ -65,10 +68,10 @@ describe('HistoryManager', () => {
         return '';
       }
     };
-    expect(hm.canRollbackForDocument(fakeDoc)).to.equal(true);
+    assert.strictEqual(hm.canRollbackForDocument(fakeDoc), true);
     const ok = await hm.validateOperationInBlock(fakeDoc, byRange as unknown as vscode.Range);
-    expect(ok).to.equal(true);
+    assert.strictEqual(ok, true);
     hm.clearLastOperationForDocument(fakeDoc);
-    expect(hm.canRollbackForDocument(fakeDoc)).to.equal(false);
+    assert.strictEqual(hm.canRollbackForDocument(fakeDoc), false);
   });
 });
